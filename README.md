@@ -343,4 +343,4 @@ Analyzing the Root Causes of API Leaks and Strategies for Security Enhancement (
 
 ## 📝 License
 
-This research project is provided under [License] for educational and research purposes. Commercial use requires explicit permission.
+This research project is provided under [GNU General Public License v3.0](LICENSE) for educational and research purposes. Commercial use requires explicit permission.
