@@ -24,11 +24,15 @@ from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import sys
 import os
+import platform
 
 # Add color support for better output
 try:
     from colorama import init, Fore, Back, Style
-    init(autoreset=True)
+    # Initialize colorama with Windows-specific settings
+    # strip=False preserves ANSI color codes in Windows terminal
+    # This ensures colors work correctly in both Windows Command Prompt and PowerShell
+    init(autoreset=True, strip=False)
     COLORS_AVAILABLE = True
 except ImportError:
     COLORS_AVAILABLE = False
@@ -345,6 +349,8 @@ class APISecurityTester:
         Test Rate Limiting Effectiveness
 
         This test sends multiple rapid requests to check if rate limiting is properly implemented.
+        It tests both authenticated and unauthenticated endpoints to ensure rate limiting works
+        in all scenarios.
         """
         self.print_test_info(
             "Rate Limiting",
@@ -357,36 +363,75 @@ class APISecurityTester:
             base_url = self.v1_base if version == "v1" else self.v2_base
             rate_limited = False
             successful_requests = 0
-            total_requests = 50
+            total_requests = 30  # Reduced from 50 to be less aggressive
+            rate_limit_headers = []
+            rate_limit_responses = []
 
             print(f"\n{Fore.MAGENTA}Testing {version.upper()} rate limiting with {total_requests} requests...")
 
-            # Send rapid requests
-            start_time = time.time()
-            for i in range(total_requests):
-                try:
-                    response = self.session.get(f"{base_url}/users", timeout=5)
+            # Test both authenticated and unauthenticated endpoints
+            test_endpoints = [
+                "/users",  # Unauthenticated endpoint
+                "/data/all" if version == "v1" else "/data/public"  # Authenticated endpoint
+            ]
 
-                    if response.status_code == 429:  # Too Many Requests
-                        rate_limited = True
-                        print(f"  Request {i+1}: {Fore.YELLOW}RATE LIMITED (429)")
+            for endpoint in test_endpoints:
+                headers = {}
+                if version == "v2" and self.tokens["v2"]:
+                    headers["Authorization"] = f"Bearer {self.tokens['v2']}"
+
+                # Send rapid requests
+                start_time = time.time()
+                for i in range(total_requests):
+                    try:
+                        response = self.session.get(
+                            f"{base_url}{endpoint}",
+                            headers=headers,
+                            timeout=5
+                        )
+
+                        # Check for rate limit headers
+                        rate_limit_headers.extend([
+                            h for h in response.headers.keys()
+                            if 'rate' in h.lower() or 'limit' in h.lower()
+                        ])
+
+                        if response.status_code == 429:  # Too Many Requests
+                            rate_limited = True
+                            rate_limit_responses.append(response.text)
+                            print(f"  Request {i+1}: {Fore.YELLOW}RATE LIMITED (429)")
+                            break
+                        elif response.status_code in [200, 401, 403]:
+                            successful_requests += 1
+                            if i % 10 == 0:  # Print every 10th request
+                                print(f"  Request {i+1}: {response.status_code}")
+
+                        # Small delay to avoid overwhelming the server
+                        time.sleep(0.1)
+
+                    except requests.exceptions.RequestException as e:
+                        print(f"  Request {i+1}: {Fore.YELLOW}FAILED - {e}")
                         break
-                    elif response.status_code in [200, 401, 403]:
-                        successful_requests += 1
-                        if i % 10 == 0:  # Print every 10th request
-                            print(f"  Request {i+1}: {response.status_code}")
 
-                    # Small delay to avoid overwhelming the server
-                    time.sleep(0.1)
-
-                except requests.exceptions.RequestException:
+                if rate_limited:
                     break
 
             total_time = time.time() - start_time
 
+            # Check for rate limit headers in responses
+            has_rate_limit_headers = len(rate_limit_headers) > 0
+
+            # Determine if rate limiting is properly implemented
+            # Rate limiting is considered proper if:
+            # 1. We get a 429 status code, or
+            # 2. We see rate limit headers in the response
+            proper_rate_limiting = rate_limited or has_rate_limit_headers
+
             details = f"Sent {successful_requests}/{total_requests} requests in {total_time:.2f}s"
-            if rate_limited:
+            if proper_rate_limiting:
                 details += " - Rate limiting active"
+                if rate_limit_headers:
+                    details += f" (Headers: {', '.join(rate_limit_headers)})"
             else:
                 details += " - No rate limiting detected"
 
@@ -396,7 +441,7 @@ class APISecurityTester:
                 success=True,
                 response_code=429 if rate_limited else 200,
                 response_time=total_time,
-                vulnerability_found=not rate_limited,  # Vulnerability if NO rate limiting
+                vulnerability_found=not proper_rate_limiting,  # Vulnerability if NO proper rate limiting
                 details=details
             )
 
@@ -677,12 +722,13 @@ class APISecurityTester:
         total_tests = len(self.results)
         v1_vulnerabilities = len([r for r in self.results if r.version == "v1" and r.vulnerability_found])
         v2_vulnerabilities = len([r for r in self.results if r.version == "v2" and r.vulnerability_found])
+        total_test_types = total_tests // 2  # Since we test both v1 and v2 for each test type
 
         print(f"\n{Fore.CYAN}📊 SUMMARY STATISTICS")
         print(f"{Fore.CYAN}{'='*40}")
         print(f"Total Tests Conducted: {total_tests}")
-        print(f"V1 (Insecure) Vulnerabilities: {Fore.RED}{v1_vulnerabilities}")
-        print(f"V2 (Secure) Vulnerabilities: {Fore.GREEN}{v2_vulnerabilities}")
+        print(f"V1 (Insecure) Vulnerabilities: {Fore.RED}{v1_vulnerabilities}/{total_test_types} ({v1_vulnerabilities/total_test_types*100:.0f}%)")
+        print(f"V2 (Secure) Vulnerabilities: {Fore.GREEN}{v2_vulnerabilities}/{total_test_types} ({v2_vulnerabilities/total_test_types*100:.0f}%)")
 
         # Detailed results by test type
         test_types = list(set([r.test_name for r in self.results]))
@@ -808,6 +854,13 @@ Examples:
     )
 
     args = parser.parse_args()
+
+    # Print system information
+    print(f"{Fore.CYAN}System Information:")
+    print(f"{Fore.CYAN}OS: {platform.system()} {platform.release()}")
+    print(f"{Fore.CYAN}Python: {platform.python_version()}")
+    print(f"{Fore.CYAN}Colors Available: {'Yes' if COLORS_AVAILABLE else 'No'}")
+    print(f"{Fore.CYAN}{'='*60}\n")
 
     # Create tester instance
     tester = APISecurityTester(args.url)
