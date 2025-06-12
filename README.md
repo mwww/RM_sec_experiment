@@ -102,7 +102,7 @@ The comprehensive testing suite (`test.py`) implements automated vulnerability a
 ### Automated Testing Execution
 
 ```bash
-# Run complete test suite ([Test Suite Overview](#test-suite-overview))
+# Run complete test suite (SQL Injection, Authentication Bypass, BOLA, Rate Limiting, Sensitive Data Exposure, Input Validation, Brute Force Protection)
 python test.py
 
 # Specific vulnerability class testing
