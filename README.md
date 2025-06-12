@@ -22,14 +22,14 @@ This research project implements a controlled experimental environment to system
 
 ```
 api-security-experiment/
-├── server.js                 # Main application server
-├── package.json             # Node.js dependencies
-├── requirements.txt         # Python testing dependencies
-├── test.py                  # Comprehensive testing suite
-├── config/                  # Configuration management
-│   ├── database.js         # Database connection & schema
-│   └── security.js         # Security configuration
-├── middleware/              # Security middleware layer
+├── server.js              # Main application server
+├── package.json           # Node.js dependencies
+├── requirements.txt       # Python testing dependencies
+├── test.py                # Comprehensive testing suite
+├── config/                # Configuration management
+│   ├── database.js        # Database connection & schema
+│   └── security.js        # Security configuration
+├── middleware/            # Security middleware layer
 │   ├── auth.js            # Authentication mechanisms
 │   ├── rateLimiter.js     # Rate limiting implementation
 │   └── zeroTrust.js       # Zero-trust architecture
