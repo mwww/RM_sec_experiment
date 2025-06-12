@@ -102,7 +102,7 @@ The comprehensive testing suite (`test.py`) implements automated vulnerability a
 ### Automated Testing Execution
 
 ```bash
-# Full experimental battery
+# Run complete test suite ([Test Suite Overview](#test-suite-overview))
 python test.py
 
 # Specific vulnerability class testing
@@ -118,7 +118,7 @@ python test.py --test brute   # Brute force protection only
 python test.py --url http://target-api.example.com:8080
 
 # Verbose output for detailed analysis
-python test.py --verbose
+python test.py --verbose      # This isn't actually used in this script since the output is already verbose and human friendly.
 ```
 
 ### Test Data & Controls
