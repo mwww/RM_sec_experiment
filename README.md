@@ -61,7 +61,7 @@ api-security-experiment/
 
 ```bash
 # 1. Clone the experimental environment
-git clone <repository-url>
+git clone https://github.com/mwww/RM_sec_experiment
 cd api-security-experiment
 
 # 2. Install Node.js dependencies
