@@ -64,15 +64,34 @@ api-security-experiment/
 git clone https://github.com/mwww/RM_sec_experiment
 cd RM_sec_experiment
 
-# Install Node.js dependencies
+# Install Node.js dependencies (includes new packages for XXE, SSRF, file handling)
 npm install
 
-# Install Python testing dependencies
+# Install Python testing dependencies (enhanced with cryptography, JWT, plotting libraries)
 pip install -r requirements.txt
 
 # Start the API server
 npm run dev
 ```
+
+### Dependencies
+
+**Node.js Packages:**
+
+- `xml2js` - XML parsing for XXE vulnerability testing
+- `request` - HTTP client for SSRF attack simulation
+- `multer` - File upload handling for upload vulnerabilities
+- `express-validator` - Input validation and sanitization
+- `bcryptjs` - Password hashing
+- `jsonwebtoken` - JWT token handling
+- `helmet` - Security headers
+- `express-rate-limit` - Rate limiting
+
+**Python Packages:**
+
+- `requests` - HTTP client for API testing
+- `colorama` - Terminal color support
+- `argparse` - Command line argument parsing
 
 ### Verification
 
@@ -87,17 +106,21 @@ curl http://localhost:3000/health
 
 ## Testing Framework
 
-The automated testing suite (`test.py`) runs attacks against both API versions to demonstrate the differences. It covers seven main vulnerability categories:
+The automated testing suite (`test.py`) runs attacks against both API versions to demonstrate the differences. It covers **11 main vulnerability categories** with comprehensive attack vectors:
 
-| Test Category                                | V1 Expected Result | V2 Expected Result | Attack Method               |
-| -------------------------------------------- | ------------------ | ------------------ | --------------------------- |
-| **SQL Injection**                            | Vulnerable         | Protected          | Payload injection analysis  |
-| **Authentication Bypass**                    | Exploitable        | Secured            | Token validation testing    |
-| **BOLA (Broken Object Level Authorization)** | Exposed            | Controlled         | Access control verification |
-| **Rate Limiting**                            | Absent             | Enforced           | Request frequency analysis  |
-| **Sensitive Data Exposure**                  | Leaking            | Sanitized          | Response content analysis   |
-| **Input Validation**                         | Missing            | Comprehensive      | Malformed input testing     |
-| **Brute Force Protection**                   | Vulnerable         | Protected          | Automated attack simulation |
+| Test Category                                | V1 Expected Result | V2 Expected Result | Attack Method              | Severity |
+| -------------------------------------------- | ------------------ | ------------------ | -------------------------- | -------- |
+| **SQL Injection**                            | Vulnerable         | Protected          | Payload injection analysis | High     |
+| **Authentication Bypass**                    | Exploitable        | Secured            | Direct endpoint access     | High     |
+| **BOLA (Broken Object Level Authorization)** | Exposed            | Controlled         | User data enumeration      | High     |
+| **Rate Limiting**                            | Absent             | Enforced           | Rapid request flooding     | Medium   |
+| **Sensitive Data Exposure**                  | Leaking            | Sanitized          | Response content analysis  | Medium   |
+| **Input Validation**                         | Missing            | Comprehensive      | Malformed input testing    | Medium   |
+| **Brute Force Protection**                   | Vulnerable         | Protected          | Automated login attempts   | Medium   |
+| **XML External Entity (XXE)**                | Vulnerable         | Protected          | External entity processing | High     |
+| **Server-Side Request Forgery (SSRF)**       | Vulnerable         | Protected          | External URL fetching      | High     |
+| **Path Traversal**                           | Vulnerable         | Protected          | File system access         | High     |
+| **JWT Manipulation**                         | Vulnerable         | Protected          | Token validation bypass    | High     |
 
 ### Running Tests
 
@@ -117,6 +140,12 @@ python test.py --test data    # Data exposure only
 python test.py --test input   # Input validation only
 python test.py --test brute   # Brute force protection only
 
+# Advanced vulnerability tests
+python test.py --test xxe     # XML External Entity attacks
+python test.py --test ssrf    # Server-Side Request Forgery
+python test.py --test path    # Path traversal attacks
+python test.py --test jwt     # JWT manipulation attacks
+
 # Target different servers
 python test.py --url http://target-api.example.com:8080
 
@@ -134,15 +163,39 @@ python test.py --print-log --log-file logs/security_test_20240115_143015_human.l
 
 ### Command Line Options
 
-| Option            | Description                                  | Example                                                  |
-| ----------------- | -------------------------------------------- | -------------------------------------------------------- |
-| `--url URL`       | Target API server URL                        | `--url http://api.example.com:8080`                      |
-| `--test TYPE`     | Run specific test category                   | `--test sql` (sql, auth, bola, rate, data, input, brute) |
-| `--runs N`        | Number of test runs for statistical analysis | `--runs 10`                                              |
-| `--verbose`       | Enable detailed output during testing        | `--verbose`                                              |
-| `--no-logs`       | Disable automatic logging to files           | `--no-logs`                                              |
-| `--print-log`     | Print latest log file to terminal            | `--print-log`                                            |
-| `--log-file PATH` | Specify specific log file to print           | `--log-file logs/test_20240115.log`                      |
+| Option            | Description                                  | Example                                                                             |
+| ----------------- | -------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `--help`          | Display help information and usage guide     | `--help`                                                                            |
+| `--url URL`       | Target API server URL                        | `--url http://api.example.com:8080`                                                 |
+| `--test TYPE`     | Run specific test category                   | `--test sql` (sql, auth, bola, rate, data, input, brute, xxe, ssrf, path, jwt, all) |
+| `--runs N`        | Number of test runs for statistical analysis | `--runs 10`                                                                         |
+| `--verbose`       | Enable detailed output during testing        | `--verbose`                                                                         |
+| `--no-logs`       | Disable automatic logging to files           | `--no-logs`                                                                         |
+| `--print-log`     | Print latest log file to terminal            | `--print-log`                                                                       |
+| `--log-file PATH` | Specify specific log file to print           | `--log-file logs/test_20240115.log`                                                 |
+
+#### Help Command Example
+
+```bash
+# Display help information
+python test.py --help
+
+# Example output:
+usage: test.py [-h] [--url URL] [--test {sql,auth,bola,rate,data,input,brute,xxe,ssrf,path,jwt,all}] [--verbose] [--runs RUNS] [--no-logs] [--print-log] [--log-file LOG_FILE]
+
+API Security Testing Suite
+
+options:
+  -h, --help            show this help message and exit
+  --url URL             Base URL of the API to test (default: http://localhost:3000)
+  --test {sql,auth,bola,rate,data,input,brute,xxe,ssrf,path,jwt,all}
+                        Specific test to run (default: all)
+  --verbose             Enable verbose output
+  --runs RUNS           Number of test runs to perform (default: 3)
+  --no-logs             Disable logging to files
+  --print-log           Print the latest log file to terminal and exit
+  --log-file LOG_FILE   Specify a specific log file to print (use with --print-log)
+```
 
 #### Log Viewing Examples
 
@@ -170,15 +223,24 @@ The system includes pre-configured test accounts:
 
 ### Attack Vectors Tested
 
-The testing suite employs various attack techniques:
+The testing suite employs realistic attack techniques:
 
-- **SQL Injection Payloads**: union-based, boolean-based, time-based, comment-based
-- **Authentication Bypass**: Multiple login attempts, token manipulation
-- **Authorization Escalation**: Direct object references, user enumeration
-- **Rate Limiting Evasion**: Rapid request sequences, endpoint flooding
-- **Data Enumeration**: Sensitive field exposure, information leakage
-- **Input Validation Bypass**: XSS, path traversal, buffer overflow, NoSQL injection
-- **Brute Force Attacks**: Automated password guessing, account lockout testing
+**Core Security Tests:**
+
+- **SQL Injection**: Multiple payload types including union-based and comment-based attacks
+- **Authentication Bypass**: Direct endpoint access without proper credentials
+- **Authorization Flaws**: Direct object reference and user data enumeration
+- **Rate Limiting**: Rapid request flooding to test protection mechanisms
+- **Data Exposure**: Checking for sensitive information in API responses
+- **Input Validation**: Malformed data including XSS payloads and oversized inputs
+- **Brute Force**: Automated login attempts to test account protection
+
+**Advanced Security Tests:**
+
+- **XML External Entity (XXE)**: External entity processing and file access attempts
+- **Server-Side Request Forgery (SSRF)**: External URL fetching through the server
+- **Path Traversal**: File upload/download and directory access testing
+- **JWT Security**: Token validation bypass using weak pattern matching
 
 ## Enhanced User Experience
 
@@ -213,9 +275,13 @@ The testing suite provides comprehensive information before starting tests:
    5. Input Validation
    6. Rate Limiting
    7. Brute Force Protection
+   8. XML External Entity (XXE) Attacks
+   9. Server-Side Request Forgery (SSRF)
+   10. Path Traversal Attacks
+   11. JWT Manipulation Attacks
 
 🚀 Starting security assessment...
-   Estimated duration: 6.0 minutes
+   Estimated duration: 8.5 minutes
 ================================================================================
 ```
 
@@ -237,6 +303,70 @@ For non-verbose runs, the suite provides helpful guidance:
    • View detailed logs: python test.py --print-log --verbose
    • View latest human log: python test.py --print-log --verbose
    • View latest machine log: python test.py --print-log
+```
+
+## Comprehensive Security Testing
+
+### Complete Vulnerability Coverage
+
+- **11 Vulnerability Categories**: Including XXE, SSRF, Path Traversal, and JWT Manipulation
+- **Realistic Attack Scenarios**: File system access, external requests, token bypass
+- **Risk Classification**: High, Medium, Low severity scoring
+- **Full API Coverage**: Both authentication and data handling vulnerabilities
+
+### API Endpoints
+
+**V1 (Vulnerable) Endpoints:**
+
+- `POST /v1/auth/login` - SQL injection vulnerable login
+- `POST /v1/auth/register` - Insecure user registration
+- `POST /v1/auth/validate-token` - Weak JWT validation
+- `POST /v1/auth/reset-password` - Predictable reset tokens
+- `POST /v1/auth/process-xml` - XXE vulnerability
+- `GET /v1/users/:id` - BOLA vulnerability
+- `GET /v1/users` - No authentication required
+- `GET /v1/data/user/:userId` - Direct object access
+- `GET /v1/data/all` - Exposes all sensitive data
+- `POST /v1/data` - No authentication required
+- `POST /v1/data/fetch-url` - SSRF vulnerability
+- `GET /v1/data/file/:filename` - Path traversal
+- `POST /v1/data/upload` - Unrestricted file upload
+- `GET /v1/data/search` - SQL injection in search
+
+**V2 (Secure) Endpoints:**
+
+- `POST /v2/auth/login` - Secure authentication with bcrypt
+- `POST /v2/auth/register` - Input validation and rate limiting
+- `POST /v2/auth/validate-token` - Proper JWT validation
+- `POST /v2/auth/reset-password` - Cryptographically secure tokens
+- `POST /v2/auth/process-data` - Safe data processing (no XML)
+- `GET /v2/users/:id` - Proper authorization checks
+- `GET /v2/users` - Admin-only access
+- `GET /v2/data/user/:userId` - Owner authorization required
+- `GET /v2/data/public` - Only public data exposed
+- `POST /v2/data` - Authentication and validation required
+
+### Testing Capabilities
+
+- **Comprehensive Test Suite**: Single integrated `test.py` with all vulnerability tests
+- **Realistic Attack Patterns**: Actual payloads and attack vectors
+- **Detailed Reporting**: Statistical analysis across multiple test runs
+- **Flexible CLI Options**: Individual test selection and verbose output modes
+
+### Example Attack Testing
+
+```bash
+# Test XXE vulnerabilities
+python test.py --test xxe --verbose
+
+# Test SSRF for external request access
+python test.py --test ssrf
+
+# Test JWT security with token manipulation
+python test.py --test jwt
+
+# Run complete security test suite
+python test.py --verbose
 ```
 
 ## V1 Implementation (Vulnerable)
