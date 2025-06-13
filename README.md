@@ -275,10 +275,10 @@ The testing suite provides comprehensive information before starting tests:
    5. Input Validation
    6. Rate Limiting
    7. Brute Force Protection
-   8. 🆕 XML External Entity (XXE) Attacks
-   9. 🆕 Server-Side Request Forgery (SSRF)
-   10. 🆕 Path Traversal Attacks
-   11. 🆕 JWT Manipulation Attacks
+   8. XML External Entity (XXE) Attacks
+   9. Server-Side Request Forgery (SSRF)
+   10. Path Traversal Attacks
+   11. JWT Manipulation Attacks
 
 🚀 Starting security assessment...
    Estimated duration: 8.5 minutes
