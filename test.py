@@ -69,6 +69,7 @@ class APISecurityTester:
         self.v2_base = f"{self.base_url}/v2"
         self.session = requests.Session()
         self.results: List[TestResult] = []
+        self.all_runs_results: List[List[TestResult]] = []  # Store results from all runs
         self.tokens = {"v1": None, "v2": None}
 
         # Test configuration
@@ -743,13 +744,24 @@ class APISecurityTester:
         total_tests = len(self.results)
         v1_vulnerabilities = len([r for r in self.results if r.version == "v1" and r.vulnerability_found])
         v2_vulnerabilities = len([r for r in self.results if r.version == "v2" and r.vulnerability_found])
-        total_test_types = total_tests // 2  # Since we test both v1 and v2 for each test type
+
+        # Calculate total test types by counting unique test names
+        test_types = set([r.test_name for r in self.results])
+        total_test_types = len(test_types)
+
+        # Only proceed with percentage calculations if we have test types
+        if total_test_types > 0:
+            v1_percentage = (v1_vulnerabilities/total_test_types*100)
+            v2_percentage = (v2_vulnerabilities/total_test_types*100)
+        else:
+            v1_percentage = 0
+            v2_percentage = 0
 
         print(f"\n{Fore.CYAN}📊 SUMMARY STATISTICS")
         print(f"{Fore.CYAN}{'='*40}")
         print(f"Total Tests Conducted: {total_tests}")
-        print(f"V1 (Insecure) Vulnerabilities: {Fore.RED}{v1_vulnerabilities}/{total_test_types} ({v1_vulnerabilities/total_test_types*100:.0f}%)")
-        print(f"V2 (Secure) Vulnerabilities: {Fore.GREEN}{v2_vulnerabilities}/{total_test_types} ({v2_vulnerabilities/total_test_types*100:.0f}%)")
+        print(f"V1 (Insecure) Vulnerabilities: {Fore.RED}{v1_vulnerabilities}/{total_test_types} ({v1_percentage:.0f}%)")
+        print(f"V2 (Secure) Vulnerabilities: {Fore.GREEN}{v2_vulnerabilities}/{total_test_types} ({v2_percentage:.0f}%)")
 
         # Detailed results by test type
         test_types = list(set([r.test_name for r in self.results]))
@@ -799,14 +811,112 @@ class APISecurityTester:
         print(f"\n{Fore.CYAN}⚡ PERFORMANCE IMPACT")
         print(f"{Fore.CYAN}{'='*30}")
 
-        v1_avg_time = sum([r.response_time for r in self.results if r.version == "v1"]) / len([r for r in self.results if r.version == "v1"])
-        v2_avg_time = sum([r.response_time for r in self.results if r.version == "v2"]) / len([r for r in self.results if r.version == "v2"])
+        v1_times = [r.response_time for r in self.results if r.version == "v1"]
+        v2_times = [r.response_time for r in self.results if r.version == "v2"]
+        if v1_times:
+            v1_avg_time = sum(v1_times) / len(v1_times)
+        else:
+            v1_avg_time = 0
+        if v2_times:
+            v2_avg_time = sum(v2_times) / len(v2_times)
+        else:
+            v2_avg_time = 0
 
         print(f"V1 Average Response Time: {v1_avg_time:.3f}s")
         print(f"V2 Average Response Time: {v2_avg_time:.3f}s")
-        print(f"Security Overhead: {((v2_avg_time - v1_avg_time) / v1_avg_time * 100):.1f}%")
+        if v1_avg_time > 0:
+            print(f"Security Overhead: {((v2_avg_time - v1_avg_time) / v1_avg_time * 100):.1f}%")
+        else:
+            print("Security Overhead: N/A (no V1 data)")
 
         return "Report generated successfully"
+
+    def generate_overall_summary(self) -> str:
+        """
+        Generate an overall summary of multiple test runs
+
+        Returns:
+            str: Formatted overall summary
+        """
+        if not self.all_runs_results:
+            return "No test runs completed"
+
+        self.print_header("OVERALL TEST SUMMARY")
+
+        # Calculate statistics across all runs
+        total_runs = len(self.all_runs_results)
+        v1_vulnerabilities_per_run = []
+        v2_vulnerabilities_per_run = []
+        v1_avg_response_times = []
+        v2_avg_response_times = []
+
+        for run_results in self.all_runs_results:
+            v1_results = [r for r in run_results if r.version == "v1"]
+            v2_results = [r for r in run_results if r.version == "v2"]
+
+            v1_vulnerabilities_per_run.append(len([r for r in v1_results if r.vulnerability_found]))
+            v2_vulnerabilities_per_run.append(len([r for r in v2_results if r.vulnerability_found]))
+
+            v1_avg_response_times.append(sum(r.response_time for r in v1_results) / len(v1_results))
+            v2_avg_response_times.append(sum(r.response_time for r in v2_results) / len(v2_results))
+
+        # Calculate averages and consistency metrics
+        avg_v1_vulnerabilities = sum(v1_vulnerabilities_per_run) / total_runs
+        avg_v2_vulnerabilities = sum(v2_vulnerabilities_per_run) / total_runs
+        avg_v1_response_time = sum(v1_avg_response_times) / total_runs
+        avg_v2_response_time = sum(v2_avg_response_times) / total_runs
+
+        # Calculate consistency (standard deviation)
+        v1_vuln_std = (sum((x - avg_v1_vulnerabilities) ** 2 for x in v1_vulnerabilities_per_run) / total_runs) ** 0.5
+        v2_vuln_std = (sum((x - avg_v2_vulnerabilities) ** 2 for x in v2_vulnerabilities_per_run) / total_runs) ** 0.5
+
+        print(f"\n{Fore.CYAN}📊 OVERALL STATISTICS")
+        print(f"{Fore.CYAN}{'='*40}")
+        print(f"Total Test Runs: {total_runs}")
+        print(f"\n{Fore.YELLOW}V1 (Insecure) Version:")
+        print(f"  Average Vulnerabilities: {avg_v1_vulnerabilities:.1f}")
+        print(f"  Consistency (Std Dev): {v1_vuln_std:.2f}")
+        print(f"  Average Response Time: {avg_v1_response_time:.3f}s")
+
+        print(f"\n{Fore.YELLOW}V2 (Secure) Version:")
+        print(f"  Average Vulnerabilities: {avg_v2_vulnerabilities:.1f}")
+        print(f"  Consistency (Std Dev): {v2_vuln_std:.2f}")
+        print(f"  Average Response Time: {avg_v2_response_time:.3f}s")
+
+        # Trend Analysis
+        print(f"\n{Fore.CYAN}📈 TREND ANALYSIS")
+        print(f"{Fore.CYAN}{'='*30}")
+
+        # Check for improvement/regression trends
+        v1_trend = "stable"
+        v2_trend = "stable"
+
+        if len(v1_vulnerabilities_per_run) > 1:
+            if v1_vulnerabilities_per_run[-1] < v1_vulnerabilities_per_run[0]:
+                v1_trend = "improving"
+            elif v1_vulnerabilities_per_run[-1] > v1_vulnerabilities_per_run[0]:
+                v1_trend = "regressing"
+
+        if len(v2_vulnerabilities_per_run) > 1:
+            if v2_vulnerabilities_per_run[-1] < v2_vulnerabilities_per_run[0]:
+                v2_trend = "improving"
+            elif v2_vulnerabilities_per_run[-1] > v2_vulnerabilities_per_run[0]:
+                v2_trend = "regressing"
+
+        print(f"V1 Security Trend: {v1_trend}")
+        print(f"V2 Security Trend: {v2_trend}")
+
+        # Reliability Assessment
+        print(f"\n{Fore.CYAN}🔍 RELIABILITY ASSESSMENT")
+        print(f"{Fore.CYAN}{'='*30}")
+
+        v1_reliability = "High" if v1_vuln_std < 0.5 else "Medium" if v1_vuln_std < 1.0 else "Low"
+        v2_reliability = "High" if v2_vuln_std < 0.5 else "Medium" if v2_vuln_std < 1.0 else "Low"
+
+        print(f"V1 Test Reliability: {v1_reliability}")
+        print(f"V2 Test Reliability: {v2_reliability}")
+
+        return "Overall summary generated successfully"
 
     def run_all_tests(self):
         """Run all security tests"""
@@ -835,6 +945,10 @@ class APISecurityTester:
             except Exception as e:
                 print(f"{Fore.RED}❌ Test failed: {e}")
 
+        # Store results from this run
+        self.all_runs_results.append(self.results.copy())
+        self.results = []  # Clear results for next run
+
         # Generate final report
         self.generate_report()
 
@@ -852,6 +966,7 @@ Examples:
   python api_security_tester.py --url http://api.example.com:8080
   python api_security_tester.py --test sql         # Run only SQL injection tests
   python api_security_tester.py --verbose          # Detailed output
+  python api_security_tester.py --runs 5           # Run tests 5 times
         """
     )
 
@@ -874,6 +989,13 @@ Examples:
         help='Enable verbose output'
     )
 
+    parser.add_argument(
+        '--runs',
+        type=int,
+        default=3,
+        help='Number of test runs to perform (default: 3)'
+    )
+
     args = parser.parse_args()
 
     # Print system information
@@ -881,6 +1003,7 @@ Examples:
     print(f"{Fore.CYAN}OS: {platform.system()} {platform.release()}")
     print(f"{Fore.CYAN}Python: {platform.python_version()}")
     print(f"{Fore.CYAN}Colors Available: {'Yes' if COLORS_AVAILABLE else 'No'}")
+    print(f"{Fore.CYAN}Number of Test Runs: {args.runs}")
     print(f"{Fore.CYAN}{'='*60}\n")
 
     # Create tester instance
@@ -897,22 +1020,28 @@ Examples:
             print(f"{Fore.RED}❌ Exiting - API server is required for testing")
             return
 
-    # Run specific test or all tests
-    if args.test == 'all':
-        tester.run_all_tests()
-    else:
-        test_map = {
-            'sql': tester.test_sql_injection,
-            'auth': tester.test_authentication_bypass,
-            'bola': tester.test_bola_vulnerability,
-            'rate': tester.test_rate_limiting,
-            'data': tester.test_sensitive_data_exposure,
-            'input': tester.test_input_validation,
-            'brute': tester.test_brute_force_protection
-        }
+    # Run tests multiple times
+    for run in range(args.runs):
+        print(f"\n{Fore.CYAN}🔄 Starting Test Run {run + 1}/{args.runs}")
+        print(f"{Fore.CYAN}{'='*40}")
 
-        test_map[args.test]()
-        tester.generate_report()
+        if args.test == 'all':
+            tester.run_all_tests()
+        else:
+            test_map = {
+                'sql': tester.test_sql_injection,
+                'auth': tester.test_authentication_bypass,
+                'bola': tester.test_bola_vulnerability,
+                'rate': tester.test_rate_limiting,
+                'data': tester.test_sensitive_data_exposure,
+                'input': tester.test_input_validation,
+                'brute': tester.test_brute_force_protection
+            }
+            test_map[args.test]()
+            tester.generate_report()
+
+    # Generate overall summary after all runs
+    tester.generate_overall_summary()
 
 if __name__ == "__main__":
     main()
