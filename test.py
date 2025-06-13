@@ -256,8 +256,26 @@ class APISecurityTester:
             if not log_path.exists():
                 print(f"{Fore.RED}❌ Log file not found: {log_file_path}")
                 return
-        else:
-            # Find the latest machine-readable log file (we need the JSON data)
+
+            # If it's a .log file, try to find the corresponding _machine.json file
+            if log_path.suffix == '.log':
+                # Replace _human.log with _machine.json or add _machine.json
+                if log_path.name.endswith('_human.log'):
+                    json_path = log_path.with_name(log_path.stem.replace('_human', '_machine') + '.json')
+                else:
+                    json_path = log_path.with_name(log_path.stem + '_machine.json')
+
+                if json_path.exists():
+                    log_path = json_path
+                    print(f"{Fore.YELLOW}ℹ️  Found corresponding machine log file: {json_path}")
+                else:
+                    print(f"{Fore.YELLOW}⚠️  No corresponding machine log file found for {log_path}")
+                    print(f"{Fore.YELLOW}💡 Available machine log files:")
+                    log_file_path = None  # Reset to trigger available logs listing
+
+        # If no log file specified or no corresponding machine log found
+        if not log_file_path or log_path.suffix == '.log':
+            # Find all machine-readable log files
             log_files = list(log_dir.glob("*_machine.json"))
 
             if not log_files:
@@ -265,13 +283,77 @@ class APISecurityTester:
                 print(f"{Fore.YELLOW}💡 Machine-readable logs are required to replay the program output.")
                 return
 
-            # Get the most recent log file
-            log_path = max(log_files, key=lambda x: x.stat().st_mtime)
+            # If there's only one log file, use it
+            if len(log_files) == 1:
+                log_path = log_files[0]
+            else:
+                # Let user select a log file
+                print(f"\n{Fore.CYAN}📋 Available log files:")
 
-        # Force JSON format for replay functionality
-        if not log_path.name.endswith('_machine.json'):
-            print(f"{Fore.YELLOW}⚠️  For log replay, please specify a machine-readable log file (*_machine.json)")
-            return
+                # Get details for each log file
+                log_details = []
+                for log_file in log_files:
+                    try:
+                        with open(log_file, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+
+                        # Extract session info
+                        session = data.get('test_session', {})
+                        start_time = datetime.fromisoformat(session.get('start_time', ''))
+                        end_time = datetime.fromisoformat(session.get('end_time', '')) if session.get('end_time') else None
+                        duration = session.get('total_duration', 'Unknown')
+                        target_url = session.get('target_url', 'Unknown')
+
+                        # Count vulnerabilities
+                        total_vulns = 0
+                        total_tests = 0
+                        for run in data.get('runs', []):
+                            results = run.get('results', [])
+                            total_tests += len(results)
+                            total_vulns += sum(1 for r in results if r.get('vulnerability_found', False))
+
+                        log_details.append({
+                            'file': log_file,
+                            'start_time': start_time,
+                            'duration': duration,
+                            'target_url': target_url,
+                            'total_tests': total_tests,
+                            'total_vulns': total_vulns,
+                            'runs': len(data.get('runs', []))
+                        })
+                    except Exception as e:
+                        print(f"{Fore.RED}❌ Error reading {log_file.name}: {e}")
+                        continue
+
+                # Sort by start time, newest first
+                log_details.sort(key=lambda x: x['start_time'], reverse=True)
+
+                # Display log files with details
+                for i, details in enumerate(log_details, 1):
+                    start_time = details['start_time'].strftime('%Y-%m-%d %H:%M:%S')
+                    print(f"\n{Fore.CYAN}   {i}. {details['file'].name}")
+                    print(f"{Fore.BLUE}      📅 Date: {start_time}")
+                    print(f"{Fore.BLUE}      ⏱️  Duration: {details['duration']}")
+                    print(f"{Fore.BLUE}      🌐 Target: {details['target_url']}")
+                    print(f"{Fore.BLUE}      🧪 Tests: {details['total_tests']} ({details['total_vulns']} vulnerabilities)")
+                    print(f"{Fore.BLUE}      🔄 Runs: {details['runs']}")
+
+                while True:
+                    try:
+                        choice = input(f"\n{Fore.YELLOW}Select a log file (1-{len(log_details)}): ").strip()
+                        if not choice:
+                            # Default to latest log file
+                            log_path = log_details[0]['file']
+                            break
+
+                        idx = int(choice)
+                        if 1 <= idx <= len(log_details):
+                            log_path = log_details[idx - 1]['file']
+                            break
+                        else:
+                            print(f"{Fore.RED}❌ Invalid selection. Please choose a number between 1 and {len(log_details)}")
+                    except ValueError:
+                        print(f"{Fore.RED}❌ Please enter a valid number")
 
         try:
             with open(log_path, 'r', encoding='utf-8') as f:
@@ -283,6 +365,9 @@ class APISecurityTester:
             # Replay the session
             APISecurityTester._replay_session(data, verbose_format)
 
+        except json.JSONDecodeError:
+            print(f"{Fore.RED}❌ Error: {log_path} is not a valid JSON file")
+            print(f"{Fore.YELLOW}💡 Please specify a machine-readable log file (*_machine.json)")
         except Exception as e:
             print(f"{Fore.RED}❌ Error reading log file: {e}")
 
@@ -422,7 +507,7 @@ class APISecurityTester:
         # Show guidance for non-verbose replays
         if not verbose_mode:
             print(f"\n{Fore.YELLOW}💡 For more detailed output, you can:")
-            print(f"{Fore.YELLOW}   • Replay with --verbose flag: python test.py --print-log --verbose")
+            print(f"{Fore.YELLOW}   • Replay with --verbose flag: python {' '.join(sys.argv)} --verbose")
 
         print(f"\n{Fore.CYAN}📄 End of replay from: {session_info.get('start_time', 'Unknown')}")
         print(f"{Fore.CYAN}{'='*80}")
@@ -522,7 +607,7 @@ class APISecurityTester:
             print(f"{Fore.MAGENTA}   • {test_names.get(args.test, 'Unknown Test')}")
 
         print(f"\n{Fore.GREEN}🚀 Starting security assessment...")
-        print(f"{Fore.GREEN}   Estimated duration: {self.estimate_duration(args)} minutes")
+        print(f"{Fore.GREEN}   Estimated duration: {self.estimate_duration(args)}")
         print(f"{Fore.CYAN}{'='*80}")
 
         # Log this information
@@ -543,7 +628,7 @@ class APISecurityTester:
         if total_time < 1:
             return f"{int(total_time * 60)} seconds"
         else:
-            return f"{total_time:.1f}"
+            return f"{total_time:.1f} minutes"
 
     def print_header(self, title: str):
         """Print a formatted header for test sections"""
@@ -1938,15 +2023,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python api_security_tester.py                    # Test localhost:3000
-  python api_security_tester.py --url http://api.example.com:8080
-  python api_security_tester.py --test sql         # Run only SQL injection tests
-  python api_security_tester.py --verbose          # Detailed output
-  python api_security_tester.py --runs 5           # Run tests 5 times
-  python api_security_tester.py --no-logs          # Disable logging to files
-  python api_security_tester.py --print-log        # Print latest machine log
-  python api_security_tester.py --print-log --verbose  # Print latest human log
-  python api_security_tester.py --print-log --log-file logs/test_20240115_143015_human.log
+  python test.py                                                                # Test localhost:3000
+  python test.py --url http://api.example.com:8080
+  python test.py --test sql                                                     # Run only SQL injection tests
+  python test.py --verbose                                                      # Detailed output
+  python test.py --runs 5                                                       # Run tests 5 times
+  python test.py --no-logs                                                      # Disable logging to files
+  python test.py --print-log                                                    # Print latest log
+  python test.py --print-log --log-file logs/test_20240115_143015_machine.json
         """
     )
 
@@ -2009,16 +2093,15 @@ Examples:
 
     # Check if server is running, prompt for new URL if not
     while not tester.check_api_health():
-        if args.verbose:
-            print(f"{Fore.YELLOW}Would you like to try a different API server URL? [Y/n]", end=" ")
-            response = input().lower().strip()
-            if response in ['', 'y', 'yes']:
-                new_url = tester.prompt_for_url()
-                tester = APISecurityTester(new_url, args.verbose)
-            else:
-                if args.verbose:
-                    print(f"{Fore.RED}❌ Exiting - API server is required for testing")
-                return
+        print(f"{Fore.YELLOW}Would you like to try a different API server URL? [Y/n]", end=" ")
+        response = input().lower().strip()
+        if response in ['', 'y', 'yes']:
+            new_url = tester.prompt_for_url()
+            tester = APISecurityTester(new_url, args.verbose)
+        else:
+            if args.verbose:
+                print(f"{Fore.RED}❌ Exiting - API server is required for testing")
+            return
 
     # Run tests multiple times
     for run in range(args.runs):
@@ -2137,10 +2220,10 @@ Examples:
     if not args.verbose:
         print(f"\n{Fore.YELLOW}💡 For more detailed output, you can:")
         print(f"{Fore.YELLOW}   • Re-run with --verbose flag: python test.py --verbose")
-        print(f"{Fore.YELLOW}   • View detailed logs: python test.py --print-log --verbose")
-        if tester.enable_logging:
-            print(f"{Fore.YELLOW}   • View latest human log: python test.py --print-log --verbose")
-            print(f"{Fore.YELLOW}   • View latest machine log: python test.py --print-log")
+        print(f"{Fore.YELLOW}   • View latest log: python test.py --print-log")
+        print(f"{Fore.YELLOW}   • View detailed latest log: python test.py --print-log --verbose")
+        # if tester.enable_logging:
+        #     print(f"{Fore.YELLOW}   • View latest log: python test.py --print-log")
 
 if __name__ == "__main__":
     main()
