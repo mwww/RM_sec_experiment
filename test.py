@@ -129,6 +129,27 @@ class APISecurityTester:
             print(f"{Fore.YELLOW}💡 Make sure your API server is running on {self.base_url}")
             return False
 
+    def prompt_for_url(self) -> str:
+        """
+        Prompt user for a new API server URL
+
+        Returns:
+            str: New API server URL
+        """
+        while True:
+            new_url = input(f"{Fore.YELLOW}Enter new API server URL [http://localhost:3000]: ").strip()
+            if not new_url:
+                new_url = "http://localhost:3000"
+            # Validate URL format
+            if not new_url.startswith(('http://', 'https://')):
+                new_url = 'http://' + new_url
+            try:
+                # Test if URL is valid
+                requests.get(new_url, timeout=2)
+                return new_url
+            except requests.exceptions.RequestException:
+                print(f"{Fore.RED}❌ Invalid URL or server not responding. Please try again.")
+
     def test_sql_injection(self) -> List[TestResult]:
         """
         Test SQL Injection Vulnerabilities
@@ -865,6 +886,17 @@ Examples:
     # Create tester instance
     tester = APISecurityTester(args.url)
 
+    # Check if server is running, prompt for new URL if not
+    while not tester.check_api_health():
+        print(f"{Fore.YELLOW}Would you like to try a different API server URL? [Y/n]", end=" ")
+        response = input().lower().strip()
+        if response in ['', 'y', 'yes']:
+            new_url = tester.prompt_for_url()
+            tester = APISecurityTester(new_url)
+        else:
+            print(f"{Fore.RED}❌ Exiting - API server is required for testing")
+            return
+
     # Run specific test or all tests
     if args.test == 'all':
         tester.run_all_tests()
@@ -878,9 +910,6 @@ Examples:
             'input': tester.test_input_validation,
             'brute': tester.test_brute_force_protection
         }
-
-        if not tester.check_api_health():
-            return
 
         test_map[args.test]()
         tester.generate_report()
