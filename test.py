@@ -20,11 +20,13 @@ import string
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import sys
 import os
 import platform
+import logging
+from pathlib import Path
 
 # Add color support for better output
 try:
@@ -42,6 +44,39 @@ except ImportError:
     class Style:
         BRIGHT = DIM = RESET_ALL = ""
 
+class Spinner:
+    """A simple spinner for command line progress indication"""
+    def __init__(self, message="", delay=0.1):
+        self.spinner_chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        self.delay = delay
+        self.message = message
+        self.stop_running = False
+        self.spinner_thread = None
+
+    def spin(self):
+        """Spin the spinner"""
+        i = 0
+        while not self.stop_running:
+            sys.stdout.write(f"\r{self.spinner_chars[i]} {self.message}")
+            sys.stdout.flush()
+            time.sleep(self.delay)
+            i = (i + 1) % len(self.spinner_chars)
+
+    def start(self):
+        """Start the spinner"""
+        self.stop_running = False
+        self.spinner_thread = threading.Thread(target=self.spin)
+        self.spinner_thread.daemon = True
+        self.spinner_thread.start()
+
+    def stop(self):
+        """Stop the spinner"""
+        self.stop_running = True
+        if self.spinner_thread:
+            self.spinner_thread.join()
+        sys.stdout.write("\r" + " " * (len(self.message) + 2) + "\r")
+        sys.stdout.flush()
+
 @dataclass
 class TestResult:
     """Data class to store test results"""
@@ -53,6 +88,27 @@ class TestResult:
     vulnerability_found: bool
     details: str
     raw_response: Optional[str] = None
+    timestamp: Optional[str] = None
+
+    def to_dict(self):
+        """Convert to dictionary for JSON serialization"""
+        return asdict(self)
+
+class ColoredFormatter(logging.Formatter):
+    """Custom formatter that preserves color codes in log files"""
+
+    def format(self, record):
+        # Store original message
+        original_msg = record.getMessage()
+
+        # Add timestamp and level info
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        level = record.levelname
+
+        # Format with colors preserved
+        formatted_msg = f"[{timestamp}] [{level}] {original_msg}"
+
+        return formatted_msg
 
 class APISecurityTester:
     """
@@ -63,7 +119,7 @@ class APISecurityTester:
     and rate limiting effectiveness.
     """
 
-    def __init__(self, base_url: str = "http://localhost:3000"):
+    def __init__(self, base_url: str = "http://localhost:3000", verbose: bool = False, enable_logging: bool = True):
         self.base_url = base_url.rstrip('/')
         self.v1_base = f"{self.base_url}/v1"
         self.v2_base = f"{self.base_url}/v2"
@@ -71,42 +127,435 @@ class APISecurityTester:
         self.results: List[TestResult] = []
         self.all_runs_results: List[List[TestResult]] = []  # Store results from all runs
         self.tokens = {"v1": None, "v2": None}
+        self.verbose = verbose
+        self.enable_logging = enable_logging
+        self.start_time = datetime.now()
+        self.run_start_time = None
+
+        # Setup logging
+        if self.enable_logging:
+            self.setup_logging()
 
         # Test configuration
         self.test_users = [
             {"username": "admin", "password": "admin"},
             {"username": "user1", "password": "password123"},
-            {"username": "testuser", "password": "testpass123"}
+            {"username": "user2", "password": "password123"}
         ]
 
-        print(f"{Fore.CYAN}🔧 API Security Tester Initialized")
-        print(f"{Fore.CYAN}📍 Target: {self.base_url}")
-        print(f"{Fore.CYAN}{'='*60}")
+        if self.verbose:
+            print(f"{Fore.CYAN}🔧 API Security Tester Initialized")
+            print(f"{Fore.CYAN}📍 Target: {self.base_url}")
+            print(f"{Fore.CYAN}{'='*60}")
+
+        self.log_info(f"API Security Tester initialized for {self.base_url}")
+
+    def setup_logging(self):
+        """Setup comprehensive logging system"""
+        # Create logs directory
+        self.log_dir = Path("logs")
+        self.log_dir.mkdir(exist_ok=True)
+
+        # Create timestamped log files
+        timestamp = self.start_time.strftime('%Y%m%d_%H%M%S')
+
+        # Human readable log
+        self.human_log_file = self.log_dir / f"security_test_{timestamp}_human.log"
+
+        # Machine readable log (JSON)
+        self.machine_log_file = self.log_dir / f"security_test_{timestamp}_machine.json"
+
+        # Setup human readable logger
+        self.human_logger = logging.getLogger('human_readable')
+        self.human_logger.setLevel(logging.INFO)
+
+        # Remove existing handlers
+        for handler in self.human_logger.handlers[:]:
+            self.human_logger.removeHandler(handler)
+
+        # Human readable file handler
+        human_handler = logging.FileHandler(self.human_log_file, encoding='utf-8')
+        human_handler.setFormatter(ColoredFormatter())
+        self.human_logger.addHandler(human_handler)
+
+        # Machine readable data storage
+        self.machine_log_data = {
+            "test_session": {
+                "start_time": self.start_time.isoformat(),
+                "target_url": self.base_url,
+                "system_info": {
+                    "os": platform.system(),
+                    "os_version": platform.release(),
+                    "python_version": platform.python_version(),
+                    "colors_available": COLORS_AVAILABLE
+                }
+            },
+            "runs": []
+        }
+
+        print(f"{Fore.CYAN}📝 Logging enabled:")
+        print(f"{Fore.CYAN}   Human readable: {self.human_log_file}")
+        print(f"{Fore.CYAN}   Machine readable: {self.machine_log_file}")
+
+    def log_info(self, message: str, color_code: str = "", display_mode: str = "both"):
+        """Log information to both human and machine readable logs
+
+        Args:
+            message: The message to log
+            color_code: Color code for the message
+            display_mode: "verbose", "normal", or "both" - when this message should be displayed
+        """
+        if not self.enable_logging:
+            return
+
+        # Log to human readable with colors preserved
+        colored_message = f"{color_code}{message}{Fore.RESET}" if color_code else message
+        self.human_logger.info(colored_message)
+
+        # Add to machine log with display mode info
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "message": message,
+            "color_code": color_code,
+            "display_mode": display_mode,
+            "type": "info"
+        }
+
+        if not hasattr(self, 'current_run_logs'):
+            self.current_run_logs = []
+        self.current_run_logs.append(log_entry)
+
+    def save_machine_log(self):
+        """Save machine readable log to JSON file"""
+        if not self.enable_logging:
+            return
+
+        self.machine_log_data["test_session"]["end_time"] = datetime.now().isoformat()
+        self.machine_log_data["test_session"]["total_duration"] = str(datetime.now() - self.start_time)
+
+        with open(self.machine_log_file, 'w', encoding='utf-8') as f:
+            json.dump(self.machine_log_data, f, indent=2, ensure_ascii=False)
+
+    @staticmethod
+    def print_log_file(log_file_path: str = None, verbose_format: bool = False):
+        """Replay log file contents as if user just ran the program"""
+        log_dir = Path("logs")
+
+        if not log_dir.exists():
+            print(f"{Fore.RED}❌ No logs directory found. Run some tests first.")
+            return
+
+        if log_file_path:
+            # User specified a log file
+            log_path = Path(log_file_path)
+            if not log_path.exists():
+                print(f"{Fore.RED}❌ Log file not found: {log_file_path}")
+                return
+        else:
+            # Find the latest machine-readable log file (we need the JSON data)
+            log_files = list(log_dir.glob("*_machine.json"))
+
+            if not log_files:
+                print(f"{Fore.RED}❌ No machine-readable log files found in {log_dir}")
+                print(f"{Fore.YELLOW}💡 Machine-readable logs are required to replay the program output.")
+                return
+
+            # Get the most recent log file
+            log_path = max(log_files, key=lambda x: x.stat().st_mtime)
+
+        # Force JSON format for replay functionality
+        if not log_path.name.endswith('_machine.json'):
+            print(f"{Fore.YELLOW}⚠️  For log replay, please specify a machine-readable log file (*_machine.json)")
+            return
+
+        try:
+            with open(log_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            print(f"\n{Fore.CYAN}🔄 Replaying test session from: {log_path.name}")
+            print(f"{Fore.CYAN}{'='*80}")
+
+            # Replay the session
+            APISecurityTester._replay_session(data, verbose_format)
+
+        except Exception as e:
+            print(f"{Fore.RED}❌ Error reading log file: {e}")
+
+    @staticmethod
+    def _replay_session(data: dict, verbose_mode: bool):
+        """Replay a test session from JSON data"""
+        session_info = data.get("test_session", {})
+        runs = data.get("runs", [])
+
+        # Replay pre-run information
+        print(f"\n{Fore.CYAN}{Style.BRIGHT}{'='*80}")
+        print(f"{Fore.CYAN}{Style.BRIGHT}🛡️  API SECURITY TESTING SUITE (REPLAY)")
+        print(f"{Fore.CYAN}{Style.BRIGHT}{'='*80}")
+
+        print(f"\n{Fore.YELLOW}📅 Test Session Information:")
+        print(f"{Fore.YELLOW}   Start Time: {session_info.get('start_time', 'Unknown')}")
+        print(f"{Fore.YELLOW}   Target URL: {session_info.get('target_url', 'Unknown')}")
+        print(f"{Fore.YELLOW}   Total Runs: {len(runs)}")
+        print(f"{Fore.YELLOW}   Total Duration: {session_info.get('total_duration', 'Unknown')}")
+
+        if 'system_info' in session_info:
+            sys_info = session_info['system_info']
+            print(f"\n{Fore.BLUE}🖥️  System Information:")
+            print(f"{Fore.BLUE}   OS: {sys_info.get('os', 'Unknown')} {sys_info.get('os_version', '')}")
+            print(f"{Fore.BLUE}   Python: {sys_info.get('python_version', 'Unknown')}")
+            print(f"{Fore.BLUE}   Colors: {'Available' if sys_info.get('colors_available') else 'Not Available'}")
+
+        print(f"{Fore.CYAN}{'='*80}")
+
+        # Replay each run
+        for run_data in runs:
+            run_num = run_data.get('run_number', 1)
+            total_runs = len(runs)
+            duration = run_data.get('duration', 'Unknown')
+            test_type = run_data.get('test_type', 'all')
+
+            # Determine test description
+            if test_type == 'all':
+                test_description = "Running comprehensive security tests"
+            else:
+                test_names = {
+                    'sql': 'SQL Injection tests',
+                    'auth': 'Authentication Bypass tests',
+                    'bola': 'BOLA vulnerability tests',
+                    'rate': 'Rate Limiting tests',
+                    'data': 'Sensitive Data Exposure tests',
+                    'input': 'Input Validation tests',
+                    'brute': 'Brute Force Protection tests'
+                }
+                test_description = f"Running {test_names.get(test_type, 'Unknown tests')}"
+
+            print(f"\n{Fore.CYAN}🔄 Run {run_num}/{total_runs}: {test_description}")
+            print(f"{Fore.CYAN}{'='*60}")
+
+            # Replay run logs if available
+            if 'logs' in run_data:
+                for log_entry in run_data['logs']:
+                    display_mode = log_entry.get('display_mode', 'both')
+
+                    # Check if this log should be displayed based on verbose mode
+                    should_display = (
+                        display_mode == 'both' or
+                        (display_mode == 'verbose' and verbose_mode) or
+                        (display_mode == 'normal' and not verbose_mode)
+                    )
+
+                    if should_display:
+                        color_code = log_entry.get('color_code', '')
+                        message = log_entry.get('message', '')
+                        print(f"{color_code}{message}{Fore.RESET}")
+
+            # Replay test results
+            results = run_data.get('results', [])
+            if results:
+                # Group results by test type
+                test_groups = {}
+                for result in results:
+                    test_name = result.get('test_name', 'Unknown')
+                    if test_name not in test_groups:
+                        test_groups[test_name] = []
+                    test_groups[test_name].append(result)
+
+                # Display results by test type
+                for test_name, test_results in test_groups.items():
+                    if verbose_mode:
+                        print(f"\n{Fore.YELLOW}{Style.BRIGHT}{'='*60}")
+                        print(f"{Fore.YELLOW}{Style.BRIGHT}🧪 {test_name}")
+                        print(f"{Fore.YELLOW}{Style.BRIGHT}{'='*60}")
+
+                    for result in test_results:
+                        version = result.get('version', 'unknown').upper()
+                        vulnerable = result.get('vulnerability_found', False)
+                        details = result.get('details', '')
+                        response_code = result.get('response_code', 0)
+                        response_time = result.get('response_time', 0)
+
+                        if verbose_mode:
+                            status_color = Fore.RED if vulnerable else Fore.GREEN
+                            status_text = "VULNERABLE ❌" if vulnerable else "SECURE ✅"
+
+                            print(f"{status_color}📊 {version}: {status_text}")
+                            print(f"   Response Code: {response_code}")
+                            print(f"   Response Time: {response_time:.3f}s")
+                            print(f"   Details: {details}")
+
+                            if vulnerable and result.get('raw_response'):
+                                print(f"   {Fore.RED}⚠️  Vulnerability Evidence: {result['raw_response'][:100]}...")
+
+            # Show run completion
+            if not verbose_mode:
+                # Calculate brief summary for non-verbose mode
+                v1_results = [r for r in results if r.get('version') == 'v1']
+                v2_results = [r for r in results if r.get('version') == 'v2']
+                v1_vulns = len([r for r in v1_results if r.get('vulnerability_found')])
+                v2_vulns = len([r for r in v2_results if r.get('vulnerability_found')])
+                total_test_types = len(set([r.get('test_name') for r in results]))
+
+                print(f"{Fore.GREEN}✅ Run {run_num}/{total_runs} completed")
+                if total_test_types > 0:
+                    print(f"   V1 Vulnerabilities: {Fore.RED}{v1_vulns}/{total_test_types}")
+                    print(f"   V2 Vulnerabilities: {Fore.GREEN}{v2_vulns}/{total_test_types}")
+            else:
+                print(f"\n{Fore.GREEN}✅ Run {run_num}/{total_runs} completed in {duration}")
+
+                # Show completion message
+        total_duration = session_info.get('total_duration', 'Unknown')
+        print(f"\n{Fore.GREEN}🎉 All {len(runs)} test runs completed in {total_duration}!")
+
+        # Replay overall summary if available
+        if 'overall_summary' in data:
+            APISecurityTester._replay_overall_summary(data['overall_summary'])
+
+        # Show guidance for non-verbose replays
+        if not verbose_mode:
+            print(f"\n{Fore.YELLOW}💡 For more detailed output, you can:")
+            print(f"{Fore.YELLOW}   • Replay with --verbose flag: python test.py --print-log --verbose")
+
+        print(f"\n{Fore.CYAN}📄 End of replay from: {session_info.get('start_time', 'Unknown')}")
+        print(f"{Fore.CYAN}{'='*80}")
+
+    @staticmethod
+    def _replay_overall_summary(summary_data: dict):
+        """Replay the overall summary statistics"""
+        print(f"\n{Fore.YELLOW}{Style.BRIGHT}{'='*60}")
+        print(f"{Fore.YELLOW}{Style.BRIGHT}🧪 OVERALL TEST SUMMARY")
+        print(f"{Fore.YELLOW}{Style.BRIGHT}{'='*60}")
+
+        total_runs = summary_data.get('total_runs', 0)
+        v1_stats = summary_data.get('v1_stats', {})
+        v2_stats = summary_data.get('v2_stats', {})
+
+        print(f"\n{Fore.CYAN}📊 OVERALL STATISTICS")
+        print(f"{Fore.CYAN}{'='*40}")
+        print(f"Total Test Runs: {total_runs}")
+
+        print(f"\n{Fore.YELLOW}V1 (Insecure) Version:")
+        print(f"  Average Vulnerabilities: {v1_stats.get('avg_vulnerabilities', 0):.1f}")
+        print(f"  Consistency (Std Dev): {v1_stats.get('consistency_std_dev', 0):.2f}")
+        print(f"  Average Response Time: {v1_stats.get('avg_response_time', 0):.3f}s")
+
+        print(f"\n{Fore.YELLOW}V2 (Secure) Version:")
+        print(f"  Average Vulnerabilities: {v2_stats.get('avg_vulnerabilities', 0):.1f}")
+        print(f"  Consistency (Std Dev): {v2_stats.get('consistency_std_dev', 0):.2f}")
+        print(f"  Average Response Time: {v2_stats.get('avg_response_time', 0):.3f}s")
+
+        # Trend Analysis
+        print(f"\n{Fore.CYAN}📈 TREND ANALYSIS")
+        print(f"{Fore.CYAN}{'='*30}")
+        print(f"V1 Security Trend: {v1_stats.get('security_trend', 'unknown')}")
+        print(f"V2 Security Trend: {v2_stats.get('security_trend', 'unknown')}")
+
+        # Reliability Assessment
+        print(f"\n{Fore.CYAN}🔍 RELIABILITY ASSESSMENT")
+        print(f"{Fore.CYAN}{'='*30}")
+        print(f"V1 Test Reliability: {v1_stats.get('reliability', 'unknown')}")
+        print(f"V2 Test Reliability: {v2_stats.get('reliability', 'unknown')}")
+
+    def print_pre_run_info(self, args):
+        """Print comprehensive information before starting tests"""
+        current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        print(f"\n{Fore.CYAN}{Style.BRIGHT}{'='*80}")
+        print(f"{Fore.CYAN}{Style.BRIGHT}🛡️  API SECURITY TESTING SUITE")
+        print(f"{Fore.CYAN}{Style.BRIGHT}{'='*80}")
+
+        print(f"\n{Fore.YELLOW}📅 Test Session Information:")
+        print(f"{Fore.YELLOW}   Start Time: {current_time}")
+        print(f"{Fore.YELLOW}   Target URL: {self.base_url}")
+        print(f"{Fore.YELLOW}   Test Runs: {args.runs}")
+        print(f"{Fore.YELLOW}   Test Type: {'All Security Tests' if args.test == 'all' else args.test.upper()}")
+        print(f"{Fore.YELLOW}   Verbose Mode: {'Enabled' if args.verbose else 'Disabled'}")
+        print(f"{Fore.YELLOW}   Logging: {'Enabled' if self.enable_logging else 'Disabled'}")
+
+        if self.enable_logging:
+            print(f"{Fore.YELLOW}   Log Directory: {self.log_dir.absolute()}")
+
+        print(f"\n{Fore.BLUE}🖥️  System Information:")
+        print(f"{Fore.BLUE}   OS: {platform.system()} {platform.release()}")
+        print(f"{Fore.BLUE}   Python: {platform.python_version()}")
+        print(f"{Fore.BLUE}   Colors: {'Available' if COLORS_AVAILABLE else 'Not Available'}")
+
+        print(f"\n{Fore.MAGENTA}🧪 Test Categories:")
+        if args.test == 'all':
+            test_categories = [
+                "SQL Injection Attacks",
+                "Authentication Bypass",
+                "Broken Object Level Authorization (BOLA)",
+                "Sensitive Data Exposure",
+                "Input Validation",
+                "Rate Limiting",
+                "Brute Force Protection"
+            ]
+            for i, category in enumerate(test_categories, 1):
+                print(f"{Fore.MAGENTA}   {i}. {category}")
+        else:
+            test_names = {
+                'sql': 'SQL Injection Attacks',
+                'auth': 'Authentication Bypass',
+                'bola': 'Broken Object Level Authorization (BOLA)',
+                'rate': 'Rate Limiting',
+                'data': 'Sensitive Data Exposure',
+                'input': 'Input Validation',
+                'brute': 'Brute Force Protection'
+            }
+            print(f"{Fore.MAGENTA}   • {test_names.get(args.test, 'Unknown Test')}")
+
+        print(f"\n{Fore.GREEN}🚀 Starting security assessment...")
+        print(f"{Fore.GREEN}   Estimated duration: {self.estimate_duration(args)} minutes")
+        print(f"{Fore.CYAN}{'='*80}")
+
+        # Log this information
+        self.log_info(f"Test session started - Target: {self.base_url}, Runs: {args.runs}, Type: {args.test}")
+
+    def estimate_duration(self, args) -> str:
+        """Estimate test duration based on configuration"""
+        base_time_per_run = 0.5 if args.test == 'all' else 0.05  # minutes
+        total_time = base_time_per_run * args.runs
+
+        if total_time < 1:
+            return f"{int(total_time * 60)} seconds"
+        else:
+            return f"{total_time:.1f}"
 
     def print_header(self, title: str):
         """Print a formatted header for test sections"""
-        print(f"\n{Fore.YELLOW}{Style.BRIGHT}{'='*60}")
-        print(f"{Fore.YELLOW}{Style.BRIGHT}🧪 {title}")
-        print(f"{Fore.YELLOW}{Style.BRIGHT}{'='*60}")
+        if self.verbose:
+            print(f"\n{Fore.YELLOW}{Style.BRIGHT}{'='*60}")
+            print(f"{Fore.YELLOW}{Style.BRIGHT}🧪 {title}")
+            print(f"{Fore.YELLOW}{Style.BRIGHT}{'='*60}")
+
+        self.log_info(f"=== {title} ===", Fore.YELLOW, "verbose")
 
     def print_test_info(self, test_name: str, description: str):
         """Print test information"""
-        print(f"\n{Fore.BLUE}🔍 Test: {test_name}")
-        print(f"{Fore.BLUE}📝 Description: {description}")
-        print(f"{Fore.BLUE}{'-'*50}")
+        if self.verbose:
+            print(f"\n{Fore.BLUE}🔍 Test: {test_name}")
+            print(f"{Fore.BLUE}📝 Description: {description}")
+            print(f"{Fore.BLUE}{'-'*50}")
+
+        self.log_info(f"Starting test: {test_name} - {description}", Fore.BLUE, "verbose")
 
     def print_result(self, result: TestResult):
         """Print formatted test result"""
-        status_color = Fore.GREEN if not result.vulnerability_found else Fore.RED
-        status_text = "SECURE ✅" if not result.vulnerability_found else "VULNERABLE ❌"
+        if self.verbose:
+            status_color = Fore.GREEN if not result.vulnerability_found else Fore.RED
+            status_text = "SECURE ✅" if not result.vulnerability_found else "VULNERABLE ❌"
 
-        print(f"{status_color}📊 {result.version.upper()}: {status_text}")
-        print(f"   Response Code: {result.response_code}")
-        print(f"   Response Time: {result.response_time:.3f}s")
-        print(f"   Details: {result.details}")
+            print(f"{status_color}📊 {result.version.upper()}: {status_text}")
+            print(f"   Response Code: {result.response_code}")
+            print(f"   Response Time: {result.response_time:.3f}s")
+            print(f"   Details: {result.details}")
 
-        if result.vulnerability_found and result.raw_response:
-            print(f"   {Fore.RED}⚠️  Vulnerability Evidence: {result.raw_response[:100]}...")
+            if result.vulnerability_found and result.raw_response:
+                print(f"   {Fore.RED}⚠️  Vulnerability Evidence: {result.raw_response[:100]}...")
+
+        # Always log results
+        status_text = "VULNERABLE" if result.vulnerability_found else "SECURE"
+        self.log_info(f"{result.version.upper()} {result.test_name}: {status_text} - {result.details}")
 
     def check_api_health(self) -> bool:
         """
@@ -115,19 +564,24 @@ class APISecurityTester:
         Returns:
             bool: True if API is healthy, False otherwise
         """
-        print(f"{Fore.CYAN}🏥 Checking API Health...")
+        if self.verbose:
+            print(f"{Fore.CYAN}🏥 Checking API Health...")
 
         try:
             response = self.session.get(f"{self.base_url}/health", timeout=5)
             if response.status_code == 200:
-                print(f"{Fore.GREEN}✅ API is healthy and running")
+                if self.verbose:
+                    print(f"{Fore.GREEN}✅ API is healthy and running")
                 return True
             else:
-                print(f"{Fore.RED}❌ API health check failed: {response.status_code}")
+                if self.verbose:
+                    print(f"{Fore.RED}❌ API health check failed: {response.status_code}")
                 return False
         except requests.exceptions.RequestException as e:
-            print(f"{Fore.RED}❌ Cannot connect to API: {e}")
-            print(f"{Fore.YELLOW}💡 Make sure your API server is running on {self.base_url}")
+            if self.verbose:
+                print(f"{Fore.RED}❌ Cannot connect to API: {e}")
+                print(f"{Fore.YELLOW}💡 Make sure your API server is running on {self.base_url}")
+                print(f"{Fore.YELLOW}💡 Try running: npm run dev (in the project directory)")
             return False
 
     def prompt_for_url(self) -> str:
@@ -149,7 +603,8 @@ class APISecurityTester:
                 requests.get(new_url, timeout=2)
                 return new_url
             except requests.exceptions.RequestException:
-                print(f"{Fore.RED}❌ Invalid URL or server not responding. Please try again.")
+                if self.verbose:
+                    print(f"{Fore.RED}❌ Invalid URL or server not responding. Please try again.")
 
     def test_sql_injection(self) -> List[TestResult]:
         """
@@ -180,7 +635,8 @@ class APISecurityTester:
             details = "No SQL injection vulnerability found"
             response_data = ""
 
-            print(f"\n{Fore.MAGENTA}Testing {version.upper()} for SQL injection...")
+            if self.verbose:
+                print(f"\n{Fore.MAGENTA}Testing {version.upper()} for SQL injection...")
 
             for i, payload in enumerate(sql_payloads, 1):
                 try:
@@ -192,7 +648,8 @@ class APISecurityTester:
                     )
                     response_time = time.time() - start_time
 
-                    print(f"  Payload {i}: {payload['username'][:30]}... -> {response.status_code}")
+                    if self.verbose:
+                        print(f"  Payload {i}: {payload['username'][:30]}... -> {response.status_code}")
 
                     # Check if injection was successful
                     if response.status_code == 200:
@@ -202,14 +659,16 @@ class APISecurityTester:
                                 vulnerable = True
                                 details = f"SQL injection successful with payload: {payload['username']}"
                                 response_data = json.dumps(data)[:200]
-                                print(f"    {Fore.RED}🚨 INJECTION SUCCESSFUL!")
+                                if self.verbose:
+                                    print(f"    {Fore.RED}🚨 INJECTION SUCCESSFUL!")
                                 break
                         except json.JSONDecodeError:
                             pass
 
                 except requests.exceptions.RequestException as e:
                     response_time = 0
-                    print(f"    {Fore.YELLOW}⚠️  Request failed: {e}")
+                    if self.verbose:
+                        print(f"    {Fore.YELLOW}⚠️  Request failed: {e}")
 
             result = TestResult(
                 test_name="SQL Injection",
@@ -219,7 +678,8 @@ class APISecurityTester:
                 response_time=response_time if 'response_time' in locals() else 0,
                 vulnerability_found=vulnerable,
                 details=details,
-                raw_response=response_data
+                raw_response=response_data,
+                timestamp=datetime.now().isoformat()
             )
 
             results.append(result)
@@ -252,7 +712,8 @@ class APISecurityTester:
             bypass_count = 0
             total_tests = len(protected_endpoints)
 
-            print(f"\n{Fore.MAGENTA}Testing {version.upper()} authentication bypass...")
+            if self.verbose:
+                print(f"\n{Fore.MAGENTA}Testing {version.upper()} authentication bypass...")
 
             for endpoint in protected_endpoints:
                 try:
@@ -260,7 +721,8 @@ class APISecurityTester:
                     response = self.session.get(f"{base_url}{endpoint}", timeout=10)
                     response_time = time.time() - start_time
 
-                    print(f"  {endpoint} -> {response.status_code}")
+                    if self.verbose:
+                        print(f"  {endpoint} -> {response.status_code}")
 
                     # If we get 200 OK without authentication, it's a bypass
                     if response.status_code == 200:
@@ -268,13 +730,15 @@ class APISecurityTester:
                         try:
                             data = response.json()
                             if isinstance(data, (list, dict)) and data:
-                                print(f"    {Fore.RED}🚨 DATA EXPOSED!")
+                                if self.verbose:
+                                    print(f"    {Fore.RED}🚨 DATA EXPOSED!")
                         except:
                             pass
 
                 except requests.exceptions.RequestException as e:
                     response_time = 0
-                    print(f"    {Fore.YELLOW}⚠️  Request failed: {e}")
+                    if self.verbose:
+                        print(f"    {Fore.YELLOW}⚠️  Request failed: {e}")
 
             vulnerable = bypass_count > 0
             details = f"Bypassed authentication on {bypass_count}/{total_tests} endpoints"
@@ -286,7 +750,8 @@ class APISecurityTester:
                 response_code=200 if bypass_count > 0 else 401,
                 response_time=response_time if 'response_time' in locals() else 0,
                 vulnerability_found=vulnerable,
-                details=details
+                details=details,
+                timestamp=datetime.now().isoformat()
             )
 
             results.append(result)
@@ -316,7 +781,8 @@ class APISecurityTester:
             bola_successful = False
             details = "BOLA attack failed - proper authorization in place"
 
-            print(f"\n{Fore.MAGENTA}Testing {version.upper()} for BOLA...")
+            if self.verbose:
+                print(f"\n{Fore.MAGENTA}Testing {version.upper()} for BOLA...")
 
             # Test accessing different user IDs
             for user_id in range(1, 5):
@@ -333,7 +799,8 @@ class APISecurityTester:
                     )
                     response_time = time.time() - start_time
 
-                    print(f"  User ID {user_id} -> {response.status_code}")
+                    if self.verbose:
+                        print(f"  User ID {user_id} -> {response.status_code}")
 
                     if response.status_code == 200:
                         try:
@@ -341,14 +808,16 @@ class APISecurityTester:
                             if 'password' in str(data) or 'api_key' in str(data):
                                 bola_successful = True
                                 details = f"BOLA successful - accessed user {user_id} data with sensitive info"
-                                print(f"    {Fore.RED}🚨 SENSITIVE DATA EXPOSED!")
+                                if self.verbose:
+                                    print(f"    {Fore.RED}🚨 SENSITIVE DATA EXPOSED!")
                                 break
                         except:
                             pass
 
                 except requests.exceptions.RequestException as e:
                     response_time = 0
-                    print(f"    {Fore.YELLOW}⚠️  Request failed: {e}")
+                    if self.verbose:
+                        print(f"    {Fore.YELLOW}⚠️  Request failed: {e}")
 
             result = TestResult(
                 test_name="BOLA",
@@ -357,7 +826,8 @@ class APISecurityTester:
                 response_code=response.status_code if 'response' in locals() else 0,
                 response_time=response_time if 'response_time' in locals() else 0,
                 vulnerability_found=bola_successful,
-                details=details
+                details=details,
+                timestamp=datetime.now().isoformat()
             )
 
             results.append(result)
@@ -389,7 +859,8 @@ class APISecurityTester:
             rate_limit_headers = []
             rate_limit_responses = []
 
-            print(f"\n{Fore.MAGENTA}Testing {version.upper()} rate limiting with {total_requests} requests...")
+            if self.verbose:
+                print(f"\n{Fore.MAGENTA}Testing {version.upper()} rate limiting with {total_requests} requests...")
 
             # Test both authenticated and unauthenticated endpoints
             test_endpoints = [
@@ -421,18 +892,21 @@ class APISecurityTester:
                         if response.status_code == 429:  # Too Many Requests
                             rate_limited = True
                             rate_limit_responses.append(response.text)
-                            print(f"  Request {i+1}: {Fore.YELLOW}RATE LIMITED (429)")
+                            if self.verbose:
+                                print(f"  Request {i+1}: {Fore.YELLOW}RATE LIMITED (429)")
                             break
                         elif response.status_code in [200, 401, 403]:
                             successful_requests += 1
                             if i % 10 == 0:  # Print every 10th request
-                                print(f"  Request {i+1}: {response.status_code}")
+                                if self.verbose:
+                                    print(f"  Request {i+1}: {response.status_code}")
 
                         # Small delay to avoid overwhelming the server
                         time.sleep(0.1)
 
                     except requests.exceptions.RequestException as e:
-                        print(f"  Request {i+1}: {Fore.YELLOW}FAILED - {e}")
+                        if self.verbose:
+                            print(f"  Request {i+1}: {Fore.YELLOW}FAILED - {e}")
                         break
 
                 if rate_limited:
@@ -464,7 +938,8 @@ class APISecurityTester:
                 response_code=429 if rate_limited else 200,
                 response_time=total_time,
                 vulnerability_found=not proper_rate_limiting,  # Vulnerability if NO proper rate limiting
-                details=details
+                details=details,
+                timestamp=datetime.now().isoformat()
             )
 
             results.append(result)
@@ -492,7 +967,8 @@ class APISecurityTester:
             sensitive_exposed = False
             exposed_fields = []
 
-            print(f"\n{Fore.MAGENTA}Testing {version.upper()} for sensitive data exposure...")
+            if self.verbose:
+                print(f"\n{Fore.MAGENTA}Testing {version.upper()} for sensitive data exposure...")
 
             # Test endpoints that might expose sensitive data
             test_endpoints = [
@@ -515,7 +991,8 @@ class APISecurityTester:
                     )
                     response_time = time.time() - start_time
 
-                    print(f"  {endpoint} -> {response.status_code}")
+                    if self.verbose:
+                        print(f"  {endpoint} -> {response.status_code}")
 
                     if response.status_code == 200:
                         try:
@@ -528,14 +1005,16 @@ class APISecurityTester:
                                 if field in response_text:
                                     sensitive_exposed = True
                                     exposed_fields.append(field)
-                                    print(f"    {Fore.RED}🚨 SENSITIVE FIELD FOUND: {field}")
+                                    if self.verbose:
+                                        print(f"    {Fore.RED}🚨 SENSITIVE FIELD FOUND: {field}")
 
                         except json.JSONDecodeError:
                             pass
 
                 except requests.exceptions.RequestException as e:
                     response_time = 0
-                    print(f"    {Fore.YELLOW}⚠️  Request failed: {e}")
+                    if self.verbose:
+                        print(f"    {Fore.YELLOW}⚠️  Request failed: {e}")
 
             details = "No sensitive data exposure detected"
             if sensitive_exposed:
@@ -548,7 +1027,8 @@ class APISecurityTester:
                 response_code=response.status_code if 'response' in locals() else 0,
                 response_time=response_time if 'response_time' in locals() else 0,
                 vulnerability_found=sensitive_exposed,
-                details=details
+                details=details,
+                timestamp=datetime.now().isoformat()
             )
 
             results.append(result)
@@ -585,7 +1065,8 @@ class APISecurityTester:
             validation_bypassed = False
             bypass_details = []
 
-            print(f"\n{Fore.MAGENTA}Testing {version.upper()} input validation...")
+            if self.verbose:
+                print(f"\n{Fore.MAGENTA}Testing {version.upper()} input validation...")
 
             for i, payload in enumerate(malicious_payloads, 1):
                 try:
@@ -597,22 +1078,26 @@ class APISecurityTester:
                     )
                     response_time = time.time() - start_time
 
-                    print(f"  Payload {i}: {str(payload)[:50]}... -> {response.status_code}")
+                    if self.verbose:
+                        print(f"  Payload {i}: {str(payload)[:50]}... -> {response.status_code}")
 
                     # Check if malicious input was processed without proper validation
                     if response.status_code == 200:
                         validation_bypassed = True
                         bypass_details.append(f"Payload {i} processed successfully")
-                        print(f"    {Fore.RED}🚨 VALIDATION BYPASSED!")
+                        if self.verbose:
+                            print(f"    {Fore.RED}🚨 VALIDATION BYPASSED!")
                     elif response.status_code == 500:
                         # Server error might indicate injection success
                         validation_bypassed = True
                         bypass_details.append(f"Payload {i} caused server error")
-                        print(f"    {Fore.RED}🚨 SERVER ERROR - POSSIBLE INJECTION!")
+                        if self.verbose:
+                            print(f"    {Fore.RED}🚨 SERVER ERROR - POSSIBLE INJECTION!")
 
                 except requests.exceptions.RequestException as e:
                     response_time = 0
-                    print(f"    {Fore.YELLOW}⚠️  Request failed: {e}")
+                    if self.verbose:
+                        print(f"    {Fore.YELLOW}⚠️  Request failed: {e}")
 
             details = "Input validation working properly"
             if validation_bypassed:
@@ -625,7 +1110,8 @@ class APISecurityTester:
                 response_code=response.status_code if 'response' in locals() else 0,
                 response_time=response_time if 'response_time' in locals() else 0,
                 vulnerability_found=validation_bypassed,
-                details=details
+                details=details,
+                timestamp=datetime.now().isoformat()
             )
 
             results.append(result)
@@ -654,7 +1140,8 @@ class APISecurityTester:
             successful_attempts = 0
             total_attempts = 20
 
-            print(f"\n{Fore.MAGENTA}Testing {version.upper()} brute force protection...")
+            if self.verbose:
+                print(f"\n{Fore.MAGENTA}Testing {version.upper()} brute force protection...")
 
             # Generate random passwords for brute force
             passwords = [f"password{i}" for i in range(total_attempts)]
@@ -670,19 +1157,23 @@ class APISecurityTester:
 
                     if response.status_code == 429:  # Rate limited
                         blocked = True
-                        print(f"  Attempt {i}: {Fore.YELLOW}BLOCKED (429)")
+                        if self.verbose:
+                            print(f"  Attempt {i}: {Fore.YELLOW}BLOCKED (429)")
                         break
                     elif response.status_code == 200:
                         successful_attempts += 1
-                        print(f"  Attempt {i}: {Fore.GREEN}SUCCESS")
+                        if self.verbose:
+                            print(f"  Attempt {i}: {Fore.GREEN}SUCCESS")
                     else:
-                        print(f"  Attempt {i}: {response.status_code}")
+                        if self.verbose:
+                            print(f"  Attempt {i}: {response.status_code}")
 
                     # Small delay between attempts
                     time.sleep(0.2)
 
                 except requests.exceptions.RequestException as e:
-                    print(f"  Attempt {i}: {Fore.YELLOW}FAILED - {e}")
+                    if self.verbose:
+                        print(f"  Attempt {i}: {Fore.YELLOW}FAILED - {e}")
                     break
 
             total_time = time.time() - start_time
@@ -700,7 +1191,8 @@ class APISecurityTester:
                 response_code=429 if blocked else 401,
                 response_time=total_time,
                 vulnerability_found=not blocked,  # Vulnerability if NOT blocked
-                details=details
+                details=details,
+                timestamp=datetime.now().isoformat()
             )
 
             results.append(result)
@@ -726,7 +1218,8 @@ class APISecurityTester:
                         data = response.json()
                         if 'token' in data:
                             self.tokens[version] = data['token']
-                            print(f"  {Fore.GREEN}✅ Logged in to {version.upper()} as {user['username']}")
+                            if self.verbose:
+                                print(f"  {Fore.GREEN}✅ Logged in to {version.upper()} as {user['username']}")
                             break
                 except:
                     continue
@@ -757,21 +1250,24 @@ class APISecurityTester:
             v1_percentage = 0
             v2_percentage = 0
 
-        print(f"\n{Fore.CYAN}📊 SUMMARY STATISTICS")
-        print(f"{Fore.CYAN}{'='*40}")
-        print(f"Total Tests Conducted: {total_tests}")
-        print(f"V1 (Insecure) Vulnerabilities: {Fore.RED}{v1_vulnerabilities}/{total_test_types} ({v1_percentage:.0f}%)")
-        print(f"V2 (Secure) Vulnerabilities: {Fore.GREEN}{v2_vulnerabilities}/{total_test_types} ({v2_percentage:.0f}%)")
+        if self.verbose:
+            print(f"\n{Fore.CYAN}📊 SUMMARY STATISTICS")
+            print(f"{Fore.CYAN}{'='*40}")
+            print(f"Total Tests Conducted: {total_tests}")
+            print(f"V1 (Insecure) Vulnerabilities: {Fore.RED}{v1_vulnerabilities}/{total_test_types} ({v1_percentage:.0f}%)")
+            print(f"V2 (Secure) Vulnerabilities: {Fore.GREEN}{v2_vulnerabilities}/{total_test_types} ({v2_percentage:.0f}%)")
 
         # Detailed results by test type
         test_types = list(set([r.test_name for r in self.results]))
 
-        print(f"\n{Fore.CYAN}📋 DETAILED RESULTS BY TEST TYPE")
-        print(f"{Fore.CYAN}{'='*50}")
+        if self.verbose:
+            print(f"\n{Fore.CYAN}📋 DETAILED RESULTS BY TEST TYPE")
+            print(f"{Fore.CYAN}{'='*50}")
 
         for test_type in test_types:
-            print(f"\n{Fore.YELLOW}🧪 {test_type}")
-            print(f"{Fore.YELLOW}{'-'*30}")
+            if self.verbose:
+                print(f"\n{Fore.YELLOW}🧪 {test_type}")
+                print(f"{Fore.YELLOW}{'-'*30}")
 
             v1_result = next((r for r in self.results if r.test_name == test_type and r.version == "v1"), None)
             v2_result = next((r for r in self.results if r.test_name == test_type and r.version == "v2"), None)
@@ -779,55 +1275,63 @@ class APISecurityTester:
             if v1_result:
                 status = "VULNERABLE ❌" if v1_result.vulnerability_found else "SECURE ✅"
                 color = Fore.RED if v1_result.vulnerability_found else Fore.GREEN
-                print(f"  V1: {color}{status}")
-                print(f"      {v1_result.details}")
+                if self.verbose:
+                    print(f"  V1: {color}{status}")
+                    print(f"      {v1_result.details}")
 
             if v2_result:
                 status = "VULNERABLE ❌" if v2_result.vulnerability_found else "SECURE ✅"
                 color = Fore.RED if v2_result.vulnerability_found else Fore.GREEN
-                print(f"  V2: {color}{status}")
-                print(f"      {v2_result.details}")
+                if self.verbose:
+                    print(f"  V2: {color}{status}")
+                    print(f"      {v2_result.details}")
 
         # Recommendations
-        print(f"\n{Fore.CYAN}💡 SECURITY RECOMMENDATIONS")
-        print(f"{Fore.CYAN}{'='*40}")
+        if self.verbose:
+            print(f"\n{Fore.CYAN}💡 SECURITY RECOMMENDATIONS")
+            print(f"{Fore.CYAN}{'='*40}")
 
         if v1_vulnerabilities > 0:
-            print(f"{Fore.YELLOW}🔧 For V1 (Insecure Version):")
-            print(f"   • Implement proper input validation and sanitization")
-            print(f"   • Add authentication and authorization mechanisms")
-            print(f"   • Implement rate limiting to prevent brute force attacks")
-            print(f"   • Use parameterized queries to prevent SQL injection")
-            print(f"   • Avoid exposing sensitive data in API responses")
+            if self.verbose:
+                print(f"{Fore.YELLOW}🔧 For V1 (Insecure Version):")
+                print(f"   • Implement proper input validation and sanitization")
+                print(f"   • Add authentication and authorization mechanisms")
+                print(f"   • Implement rate limiting to prevent brute force attacks")
+                print(f"   • Use parameterized queries to prevent SQL injection")
+                print(f"   • Avoid exposing sensitive data in API responses")
 
         if v2_vulnerabilities == 0:
-            print(f"{Fore.GREEN}✅ V2 (Secure Version) shows good security practices!")
+            if self.verbose:
+                print(f"{Fore.GREEN}✅ V2 (Secure Version) shows good security practices!")
         else:
-            print(f"{Fore.YELLOW}🔧 For V2 (Secure Version):")
-            print(f"   • Review and strengthen remaining vulnerabilities")
-            print(f"   • Consider additional security layers")
+            if self.verbose:
+                print(f"{Fore.YELLOW}🔧 For V2 (Secure Version):")
+                print(f"   • Review and strengthen remaining vulnerabilities")
+                print(f"   • Consider additional security layers")
 
         # Performance impact
-        print(f"\n{Fore.CYAN}⚡ PERFORMANCE IMPACT")
-        print(f"{Fore.CYAN}{'='*30}")
+        if self.verbose:
+            print(f"\n{Fore.CYAN}⚡ PERFORMANCE IMPACT")
+            print(f"{Fore.CYAN}{'='*30}")
 
-        v1_times = [r.response_time for r in self.results if r.version == "v1"]
-        v2_times = [r.response_time for r in self.results if r.version == "v2"]
-        if v1_times:
-            v1_avg_time = sum(v1_times) / len(v1_times)
-        else:
-            v1_avg_time = 0
-        if v2_times:
-            v2_avg_time = sum(v2_times) / len(v2_times)
-        else:
-            v2_avg_time = 0
+            v1_times = [r.response_time for r in self.results if r.version == "v1"]
+            v2_times = [r.response_time for r in self.results if r.version == "v2"]
+            if v1_times:
+                v1_avg_time = sum(v1_times) / len(v1_times)
+            else:
+                v1_avg_time = 0
+            if v2_times:
+                v2_avg_time = sum(v2_times) / len(v2_times)
+            else:
+                v2_avg_time = 0
 
-        print(f"V1 Average Response Time: {v1_avg_time:.3f}s")
-        print(f"V2 Average Response Time: {v2_avg_time:.3f}s")
-        if v1_avg_time > 0:
-            print(f"Security Overhead: {((v2_avg_time - v1_avg_time) / v1_avg_time * 100):.1f}%")
-        else:
-            print("Security Overhead: N/A (no V1 data)")
+            if self.verbose:
+                print(f"V1 Average Response Time: {v1_avg_time:.3f}s")
+                print(f"V2 Average Response Time: {v2_avg_time:.3f}s")
+                if v1_avg_time > 0:
+                    print(f"Security Overhead: {((v2_avg_time - v1_avg_time) / v1_avg_time * 100):.1f}%")
+                else:
+                    print("Security Overhead: N/A (no V1 data)")
 
         return "Report generated successfully"
 
@@ -842,6 +1346,7 @@ class APISecurityTester:
             return "No test runs completed"
 
         self.print_header("OVERALL TEST SUMMARY")
+        self.log_info("Generating overall test summary", Fore.CYAN)
 
         # Calculate statistics across all runs
         total_runs = len(self.all_runs_results)
@@ -883,7 +1388,13 @@ class APISecurityTester:
         print(f"  Consistency (Std Dev): {v2_vuln_std:.2f}")
         print(f"  Average Response Time: {avg_v2_response_time:.3f}s")
 
-        # Trend Analysis
+        # Log overall statistics
+        self.log_info("=== OVERALL STATISTICS ===", Fore.CYAN)
+        self.log_info(f"Total Test Runs: {total_runs}")
+        self.log_info(f"V1 (Insecure) Version - Avg Vulnerabilities: {avg_v1_vulnerabilities:.1f}, Consistency: {v1_vuln_std:.2f}, Avg Response Time: {avg_v1_response_time:.3f}s", Fore.YELLOW)
+        self.log_info(f"V2 (Secure) Version - Avg Vulnerabilities: {avg_v2_vulnerabilities:.1f}, Consistency: {v2_vuln_std:.2f}, Avg Response Time: {avg_v2_response_time:.3f}s", Fore.YELLOW)
+
+                # Trend Analysis
         print(f"\n{Fore.CYAN}📈 TREND ANALYSIS")
         print(f"{Fore.CYAN}{'='*30}")
 
@@ -906,6 +1417,11 @@ class APISecurityTester:
         print(f"V1 Security Trend: {v1_trend}")
         print(f"V2 Security Trend: {v2_trend}")
 
+        # Log trend analysis
+        self.log_info("=== TREND ANALYSIS ===", Fore.CYAN)
+        self.log_info(f"V1 Security Trend: {v1_trend}")
+        self.log_info(f"V2 Security Trend: {v2_trend}")
+
         # Reliability Assessment
         print(f"\n{Fore.CYAN}🔍 RELIABILITY ASSESSMENT")
         print(f"{Fore.CYAN}{'='*30}")
@@ -916,16 +1432,51 @@ class APISecurityTester:
         print(f"V1 Test Reliability: {v1_reliability}")
         print(f"V2 Test Reliability: {v2_reliability}")
 
+        # Log reliability assessment
+        self.log_info("=== RELIABILITY ASSESSMENT ===", Fore.CYAN)
+        self.log_info(f"V1 Test Reliability: {v1_reliability}")
+        self.log_info(f"V2 Test Reliability: {v2_reliability}")
+
+        # Store overall summary in machine log
+        if self.enable_logging:
+            overall_summary = {
+                "total_runs": total_runs,
+                "v1_stats": {
+                    "avg_vulnerabilities": avg_v1_vulnerabilities,
+                    "consistency_std_dev": v1_vuln_std,
+                    "avg_response_time": avg_v1_response_time,
+                    "security_trend": v1_trend,
+                    "reliability": v1_reliability
+                },
+                "v2_stats": {
+                    "avg_vulnerabilities": avg_v2_vulnerabilities,
+                    "consistency_std_dev": v2_vuln_std,
+                    "avg_response_time": avg_v2_response_time,
+                    "security_trend": v2_trend,
+                    "reliability": v2_reliability
+                },
+                "generated_at": datetime.now().isoformat()
+            }
+            self.machine_log_data["overall_summary"] = overall_summary
+
+        self.log_info("Overall summary generation completed", Fore.GREEN)
         return "Overall summary generated successfully"
 
     def run_all_tests(self):
         """Run all security tests"""
+        self.run_start_time = datetime.now()
+
         if not self.check_api_health():
-            print(f"{Fore.RED}❌ Cannot proceed with tests - API is not accessible")
+            if self.verbose:
+                print(f"{Fore.RED}❌ Cannot proceed with tests - API is not accessible")
+            self.log_info("API health check failed - cannot proceed with tests", Fore.RED)
             return
 
-        print(f"\n{Fore.GREEN}🚀 Starting comprehensive security testing...")
-        print(f"{Fore.GREEN}⏱️  This may take several minutes to complete")
+        if self.verbose:
+            print(f"\n{Fore.GREEN}🚀 Starting comprehensive security testing...")
+            print(f"{Fore.GREEN}⏱️  This may take several minutes to complete")
+
+        self.log_info("Starting comprehensive security testing")
 
         # Run all tests
         test_methods = [
@@ -940,20 +1491,43 @@ class APISecurityTester:
 
         for test_method in test_methods:
             try:
+                test_start = datetime.now()
                 test_method()
+                test_duration = datetime.now() - test_start
+                self.log_info(f"Test {test_method.__name__} completed in {test_duration}")
                 time.sleep(1)  # Brief pause between tests
             except Exception as e:
-                print(f"{Fore.RED}❌ Test failed: {e}")
+                if self.verbose:
+                    print(f"{Fore.RED}❌ Test failed: {e}")
+                self.log_info(f"Test {test_method.__name__} failed: {e}", Fore.RED)
 
-        # Store results from this run
+                # Store results from this run with timing info
+        run_duration = datetime.now() - self.run_start_time
+        run_data = {
+            "run_number": len(self.all_runs_results) + 1,
+            "start_time": self.run_start_time.isoformat(),
+            "duration": str(run_duration),
+            "results": [result.to_dict() for result in self.results],
+            "logs": getattr(self, 'current_run_logs', [])
+        }
+
+        if self.enable_logging:
+            self.machine_log_data["runs"].append(run_data)
+
+        # Clear current run logs for next run
+        self.current_run_logs = []
+
         self.all_runs_results.append(self.results.copy())
         self.results = []  # Clear results for next run
 
         # Generate final report
         self.generate_report()
 
-        print(f"\n{Fore.GREEN}🎉 Security testing completed!")
-        print(f"{Fore.GREEN}📄 Check the detailed report above for findings and recommendations")
+        if self.verbose:
+            print(f"\n{Fore.GREEN}🎉 Security testing completed in {run_duration}!")
+            print(f"{Fore.GREEN}📄 Check the detailed report above for findings and recommendations")
+
+        self.log_info(f"Security testing run completed in {run_duration}")
 
 def main():
     """Main function to run the security tester"""
@@ -967,6 +1541,10 @@ Examples:
   python api_security_tester.py --test sql         # Run only SQL injection tests
   python api_security_tester.py --verbose          # Detailed output
   python api_security_tester.py --runs 5           # Run tests 5 times
+  python api_security_tester.py --no-logs          # Disable logging to files
+  python api_security_tester.py --print-log        # Print latest machine log
+  python api_security_tester.py --print-log --verbose  # Print latest human log
+  python api_security_tester.py --print-log --log-file logs/test_20240115_143015_human.log
         """
     )
 
@@ -996,38 +1574,83 @@ Examples:
         help='Number of test runs to perform (default: 3)'
     )
 
+    parser.add_argument(
+        '--no-logs',
+        action='store_true',
+        help='Disable logging to files'
+    )
+
+    parser.add_argument(
+        '--print-log',
+        action='store_true',
+        help='Print the latest log file to terminal and exit'
+    )
+
+    parser.add_argument(
+        '--log-file',
+        type=str,
+        help='Specify a specific log file to print (use with --print-log)'
+    )
+
     args = parser.parse_args()
 
-    # Print system information
-    print(f"{Fore.CYAN}System Information:")
-    print(f"{Fore.CYAN}OS: {platform.system()} {platform.release()}")
-    print(f"{Fore.CYAN}Python: {platform.python_version()}")
-    print(f"{Fore.CYAN}Colors Available: {'Yes' if COLORS_AVAILABLE else 'No'}")
-    print(f"{Fore.CYAN}Number of Test Runs: {args.runs}")
-    print(f"{Fore.CYAN}{'='*60}\n")
+    # Handle log printing mode
+    if args.print_log:
+        APISecurityTester.print_log_file(args.log_file, args.verbose)
+        return
 
     # Create tester instance
-    tester = APISecurityTester(args.url)
+    tester = APISecurityTester(args.url, args.verbose, not args.no_logs)
+
+    # Print comprehensive pre-run information
+    tester.print_pre_run_info(args)
 
     # Check if server is running, prompt for new URL if not
     while not tester.check_api_health():
-        print(f"{Fore.YELLOW}Would you like to try a different API server URL? [Y/n]", end=" ")
-        response = input().lower().strip()
-        if response in ['', 'y', 'yes']:
-            new_url = tester.prompt_for_url()
-            tester = APISecurityTester(new_url)
-        else:
-            print(f"{Fore.RED}❌ Exiting - API server is required for testing")
-            return
+        if args.verbose:
+            print(f"{Fore.YELLOW}Would you like to try a different API server URL? [Y/n]", end=" ")
+            response = input().lower().strip()
+            if response in ['', 'y', 'yes']:
+                new_url = tester.prompt_for_url()
+                tester = APISecurityTester(new_url, args.verbose)
+            else:
+                if args.verbose:
+                    print(f"{Fore.RED}❌ Exiting - API server is required for testing")
+                return
 
     # Run tests multiple times
     for run in range(args.runs):
-        print(f"\n{Fore.CYAN}🔄 Starting Test Run {run + 1}/{args.runs}")
-        print(f"{Fore.CYAN}{'='*40}")
+                # Determine what tests are being run
+        if args.test == 'all':
+            test_description = "Running comprehensive security tests"
+        else:
+            test_names = {
+                'sql': 'SQL Injection tests',
+                'auth': 'Authentication Bypass tests',
+                'bola': 'BOLA vulnerability tests',
+                'rate': 'Rate Limiting tests',
+                'data': 'Sensitive Data Exposure tests',
+                'input': 'Input Validation tests',
+                'brute': 'Brute Force Protection tests'
+            }
+            test_description = f"Running {test_names.get(args.test, 'Unknown tests')}"
+
+        run_message = f"Run {run + 1}/{args.runs}: {test_description}"
+
+        # Show run info before starting
+        print(f"\n{Fore.CYAN}🔄 {run_message}")
+        print(f"{Fore.CYAN}{'='*60}")
+
+        if not args.verbose:
+            spinner = Spinner(message=run_message)
+            spinner.start()
 
         if args.test == 'all':
             tester.run_all_tests()
         else:
+            # Single test run
+            tester.run_start_time = datetime.now()
+
             test_map = {
                 'sql': tester.test_sql_injection,
                 'auth': tester.test_authentication_bypass,
@@ -1037,11 +1660,69 @@ Examples:
                 'input': tester.test_input_validation,
                 'brute': tester.test_brute_force_protection
             }
+
+            test_start = datetime.now()
             test_map[args.test]()
+            test_duration = datetime.now() - test_start
+
+            # Store results from this run for single test runs too
+            run_data = {
+                "run_number": len(tester.all_runs_results) + 1,
+                "start_time": tester.run_start_time.isoformat(),
+                "duration": str(test_duration),
+                "test_type": args.test,
+                "results": [result.to_dict() for result in tester.results],
+                "logs": getattr(tester, 'current_run_logs', [])
+            }
+
+            if tester.enable_logging:
+                tester.machine_log_data["runs"].append(run_data)
+
+            tester.all_runs_results.append(tester.results.copy())
+            tester.results = []
             tester.generate_report()
 
+            tester.log_info(f"Single test run ({args.test}) completed in {test_duration}")
+
+        if not args.verbose:
+            spinner.stop()
+            # Show brief summary for non-verbose mode
+            current_results = tester.all_runs_results[-1] if tester.all_runs_results else tester.results
+            v1_vulns = len([r for r in current_results if r.version == "v1" and r.vulnerability_found])
+            v2_vulns = len([r for r in current_results if r.version == "v2" and r.vulnerability_found])
+            total_test_types = len(set([r.test_name for r in current_results])) if current_results else 0
+
+            print(f"{Fore.GREEN}✅ Run {run + 1}/{args.runs} completed")
+            if total_test_types > 0:
+                print(f"   V1 Vulnerabilities: {Fore.RED}{v1_vulns}/{total_test_types}")
+                print(f"   V2 Vulnerabilities: {Fore.GREEN}{v2_vulns}/{total_test_types}")
+        else:
+            print(f"\n{Fore.GREEN}✅ Run {run + 1}/{args.runs} completed")
+
     # Generate overall summary after all runs
+    total_duration = datetime.now() - tester.start_time
+    print(f"\n{Fore.GREEN}🎉 All {args.runs} test runs completed in {total_duration}!")
+    tester.log_info(f"All {args.runs} test runs completed in {total_duration}", Fore.GREEN)
     tester.generate_overall_summary()
+
+    # Save final logs
+    if tester.enable_logging:
+        tester.save_machine_log()
+        print(f"\n{Fore.CYAN}📝 Logs saved:")
+        print(f"{Fore.CYAN}   Human readable: {tester.human_log_file}")
+        print(f"{Fore.CYAN}   Machine readable: {tester.machine_log_file}")
+
+    print(f"\n{Fore.GREEN}📄 Security testing complete. Total duration: {total_duration}")
+    print(f"{Fore.GREEN}🔍 Check the reports above for detailed findings.")
+
+    # Show additional options for non-verbose runs
+    if not args.verbose:
+        print(f"\n{Fore.YELLOW}💡 For more detailed output, you can:")
+        print(f"{Fore.YELLOW}   • Re-run with --verbose flag: python test.py --verbose")
+        print(f"{Fore.YELLOW}   • View detailed logs: python test.py --print-log --verbose")
+        if tester.enable_logging:
+            print(f"{Fore.YELLOW}   • View latest human log: python test.py --print-log --verbose")
+            print(f"{Fore.YELLOW}   • View latest machine log: python test.py --print-log")
 
 if __name__ == "__main__":
     main()
